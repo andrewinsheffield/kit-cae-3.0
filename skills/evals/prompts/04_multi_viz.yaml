@@ -8,7 +8,7 @@ data_file: disk_out_ref.npz
 validator: validators/validate_04.py
 
 prompt: |
-  Import `data/disk_out_ref.npz` into Kit-CAE as "SIDS Unstructured" schema.
+  Import `data/disk_out_ref.npz` into Kit-CAE using the "CGNS" schema.
   Create two visualizations on the same dataset:
 
   1. A volume rendering colored by temperature (the "Temp" field) using
@@ -17,8 +17,8 @@ prompt: |
      temperature (the "Temp" field), scaled small enough that the volume
      cloud is clearly visible
 
-  Remember that NPZ files imported as SIDS Unstructured require a field
-  association fix before visualization operators work correctly.
+  Bind visualization fields by their OmniSci field instance names (`Temp` and
+  `V`); they are APIs on the imported dataset, not child field prims.
 
   Capture a clean screenshot at 1280x720 showing both visualizations and save
   it to `{render_dir}/eval_04_multi.png`.

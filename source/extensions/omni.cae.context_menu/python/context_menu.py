@@ -13,27 +13,35 @@ __all__ = [
     "get_operators_menu_dict",
     "get_flow_menu_dict",
     "get_add_menu_dict",
-    "get_colormap_menu_dict",
 ]
 
 
 import inspect
+import re
 from functools import partial, wraps
 from logging import getLogger
 from pathlib import Path
 from typing import Callable, Optional, Union
 
 import omni.kit.commands
-from omni.cae.data.commands import execute_command
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import cae
 from omni.cae.schema import viz as cae_viz
 from omni.kit.async_engine import run_coroutine
 from omni.usd import get_context, get_stage_next_free_path
-from pxr import Sdf, Usd, UsdGeom, UsdVol
+from pxr import OmniSci, Sdf, Usd, UsdGeom, UsdVol
 
 from .dialog import TypeSelectionDialog, ValidatedInputDialog
 
 logger = getLogger(__name__)
+
+
+def _request_property_window_rebuild() -> None:
+    """Refresh schema-driven frames after an API changes prim structure."""
+    from omni.kit.window.property import get_window
+
+    if property_window := get_window():
+        property_window.request_rebuild()
 
 
 def get_hovered_prim(objects: dict, filter: Callable[[Usd.Prim], bool] = None) -> Union[Usd.Prim, None]:
@@ -59,11 +67,13 @@ def get_active_prims(objects: dict, filter: Callable[[Usd.Prim], bool] = None) -
     We define active prims as [hovered prim + selected prims] if hovered prim is
     in the selected prims collection, otherwise just return the hovered prim.
     """
-    selected_prims = get_selected_prims(objects, filter)
-    hovered_prim = get_hovered_prim(objects, filter)
-    if hovered_prim and hovered_prim in selected_prims:
-        return selected_prims
-    return [hovered_prim] if hovered_prim else []
+    selected_prims = get_selected_prims(objects)
+    hovered_prim = get_hovered_prim(objects)
+    active_prims = selected_prims if hovered_prim and hovered_prim in selected_prims else [hovered_prim]
+    active_prims = [prim for prim in active_prims if prim]
+    if filter is not None and not all(filter(prim) for prim in active_prims):
+        return []
+    return active_prims
 
 
 def get_anchor_path(stage: Usd.Stage) -> Sdf.Path:
@@ -85,7 +95,30 @@ def can_apply_api_prim(api_schema: str, prim: Usd.Prim) -> bool:
 
 def can_apply_api(api_schema: str, objects: dict) -> bool:
     prims = get_selected_prims(objects)
-    return all(can_apply_api_prim(api_schema, prim) for prim in prims)
+    return bool(prims) and all(can_apply_api_prim(api_schema, prim) for prim in prims)
+
+
+def is_scientific_field_owner(prim: Usd.Prim) -> bool:
+    """Return whether *prim* directly owns matching OmniSci field and array metadata."""
+    field_names = {
+        str(schema).partition(":")[2]
+        for schema in prim.GetAppliedSchemas()
+        if str(schema).startswith("OmniSciFieldAPI:")
+    }
+    array_names = {
+        str(schema).partition(":")[2]
+        for schema in prim.GetAppliedSchemas()
+        if str(schema).startswith("OmniSciArrayAPI:")
+    }
+    return bool(field_names.intersection(array_names))
+
+
+def can_apply_array_expression(objects: dict) -> bool:
+    """Restrict array expressions to their prim-local scientific field owner."""
+    prims = get_selected_prims(objects)
+    return bool(prims) and all(
+        is_scientific_field_owner(prim) and can_apply_api_prim("CaeArrayExpressionAPI", prim) for prim in prims
+    )
 
 
 def add_api(
@@ -94,26 +127,33 @@ def add_api(
     objects: dict = {},
     payload=None,
     suggestions_provider: Optional[Callable[[list[Usd.Prim]], list[str]]] = None,
+    validator: Optional[Callable[[str], tuple[bool, str]]] = None,
+    prim_filter: Optional[Callable[[Usd.Prim], bool]] = None,
 ):
     if payload is not None:
         objects = {}
         objects["stage"] = payload.get_stage()
         objects["prim_list"] = [path for path in payload]
 
-    prims = get_selected_prims(objects, lambda prim: prim.IsA(schema))
+    prims = get_selected_prims(objects, prim_filter or (lambda prim: prim.IsA(schema)))
     logger.info("add_api(%s, %s, %s)", schema, api_schema, prims)
 
     registry = Usd.SchemaRegistry()
     if registry.IsMultipleApplyAPISchema(api_schema):
-        run_coroutine(add_api_async(prims, api_schema, suggestions_provider))
+        run_coroutine(add_api_async(prims, api_schema, suggestions_provider, validator))
     else:
         for prim in prims:
             prim.ApplyAPI(api_schema)
             logger.info("Applied %s to prim %s", api_schema, prim.GetPath())
+        if prims:
+            _request_property_window_rebuild()
 
 
 async def add_api_async(
-    prims: list[Usd.Prim], api_schema: str, suggestions_provider: Optional[Callable[[list[Usd.Prim]], list[str]]] = None
+    prims: list[Usd.Prim],
+    api_schema: str,
+    suggestions_provider: Optional[Callable[[list[Usd.Prim]], list[str]]] = None,
+    validator: Optional[Callable[[str], tuple[bool, str]]] = None,
 ):
     """Show a dialog to enter instance name and apply API to prims."""
     from .api_schema_dialog import APISchemaDialog
@@ -123,10 +163,24 @@ async def add_api_async(
         return
 
     # Show API schema dialog with provided suggestions provider
+    def combined_validator(instance_name: str) -> tuple[bool, str]:
+        instance_name = instance_name.strip()
+        if validator:
+            valid, message = validator(instance_name)
+            if not valid:
+                return valid, message
+        for prim in prims:
+            if not prim.CanApplyAPI(api_schema, instance_name):
+                return False, f"Cannot apply to prim {prim.GetName()}"
+            if prim.HasAPI(api_schema, instance_name):
+                return False, "Instance name already exists"
+        return True, ""
+
     dialog = APISchemaDialog(
         api_schema=api_schema,
         prims=prims,
         suggestions_provider=suggestions_provider,
+        validator=combined_validator if validator else None,
         default_value="default",
     )
     instance_name = await dialog.exec()
@@ -136,6 +190,13 @@ async def add_api_async(
         for prim in prims:
             prim.ApplyAPI(api_schema, instance_name)
             logger.info("Applied %s:%s to prim %s", api_schema, instance_name, prim.GetPath())
+        _request_property_window_rebuild()
+
+
+def validate_array_expression_name(name: str) -> tuple[bool, str]:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        return False, "Use a letter or underscore followed by letters, digits, or underscores"
+    return True, ""
 
 
 def get_flow_layer_numbers(stage: Usd.Stage) -> list[int]:
@@ -143,11 +204,10 @@ def get_flow_layer_numbers(stage: Usd.Stage) -> list[int]:
     from usdrt import Usd as UsdRT
 
     context = omni.usd.get_context()
-    stage = context.get_stage() if context else None
-    if stage is None:
+    if context is None or stage is None:
         return []
 
-    stage_rt = UsdRT.Stage.Attach(context.get_stage_id()) if context else None
+    stage_rt = UsdRT.Stage.Attach(context.get_stage_id())
     if stage_rt is None:
         return []
 
@@ -181,9 +241,29 @@ def get_icon_path(name) -> str:
     return str(icon_path)
 
 
+def _safe_isa(prim: Usd.Prim, schema) -> bool:
+    """IsA wrapper that catches TfType lookup failures gracefully."""
+    try:
+        return prim.IsA(schema)
+    except Exception as e:
+        logger.warning("prim.IsA(%s) failed for %s: %s", getattr(schema, "__name__", repr(schema)), prim.GetPath(), e)
+        return False
+
+
+def _is_dataset_prim(prim: Usd.Prim) -> bool:
+    return prim.IsA(cae.DataSet) or _safe_isa(prim, OmniSci.Dataset)
+
+
+def _is_boundable_or_dataset_prim(prim: Usd.Prim) -> bool:
+    return _is_dataset_prim(prim) or prim.IsA(UsdGeom.Boundable)
+
+
+def _has_active_prims(objects: dict, prim_filter: Callable[[Usd.Prim], bool]) -> bool:
+    return objects.get("stage") is not None and bool(get_active_prims(objects, prim_filter))
+
+
 def schema_isa(schema, objects: dict) -> bool:
-    stage: Usd.Stage = objects.get("stage")
-    return stage and len(get_active_prims(objects, lambda prim: prim.IsA(schema))) > 0
+    return _has_active_prims(objects, lambda prim: _safe_isa(prim, schema))
 
 
 def async_callback(async_fn: Callable):
@@ -223,7 +303,7 @@ class BoundingBox:
 
     @staticmethod
     def enabled(objects: dict) -> bool:
-        active_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_prims = get_active_prims(objects, _is_dataset_prim)
         return len(active_prims) > 0
 
     @staticmethod
@@ -232,7 +312,7 @@ class BoundingBox:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
         assert len(active_dataset_prims) > 0
 
         name = f"BoundingBox_{active_dataset_prims[0].GetName()}" if len(active_dataset_prims) == 1 else "BoundingBox"
@@ -263,7 +343,10 @@ class UnitSphere:
             return None
 
         # get active prims (optional)
-        active_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet) or prim.IsA(UsdGeom.Boundable))
+        active_prims = get_active_prims(
+            objects,
+            _is_boundable_or_dataset_prim,
+        )
 
         prim_path = get_stage_next_free_path(stage, get_anchor_path(stage).AppendChild("UnitSphere"), False)
         await execute_command(
@@ -300,10 +383,26 @@ class UnitSphere:
         return int(result) if result is not None else None
 
 
-class VolumeSlice:
+class Colormap:
     @staticmethod
     def show(objects: dict) -> bool:
         return objects.get("stage") is not None
+
+    @staticmethod
+    @async_callback
+    @select_result
+    async def onclick(objects: dict):
+        stage = objects.get("stage")
+        assert stage is not None, "missing stage"
+        prim_path = get_stage_next_free_path(stage, get_anchor_path(stage).AppendChild("Colormap"), False)
+        await execute_command("CreateCaeVizColormap", prim_path=str(prim_path))
+        return prim_path
+
+
+class VolumeSlice:
+    @staticmethod
+    def show(objects: dict) -> bool:
+        return VolumeSlice.enabled(objects)
 
     @staticmethod
     def enabled(objects: dict) -> bool:
@@ -317,8 +416,9 @@ class VolumeSlice:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_prim = get_active_prims(objects, lambda prim: prim.IsA(UsdVol.Volume))[0]
-        assert active_prim is not None, "missing active prim"
+        active_prims = get_active_prims(objects, lambda prim: prim.IsA(UsdVol.Volume))
+        assert len(active_prims) == 1, "expected one active UsdVolVolume prim"
+        active_prim = active_prims[0]
 
         shape = await VolumeSlice.get_shape()
         if shape is None:
@@ -350,7 +450,7 @@ class OperatorsPlanarSlice:
 
     @staticmethod
     def enabled(objects: dict) -> bool:
-        return schema_isa(cae.DataSet, objects)
+        return _has_active_prims(objects, _is_dataset_prim)
 
     @staticmethod
     @async_callback
@@ -358,7 +458,7 @@ class OperatorsPlanarSlice:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
         assert len(active_dataset_prims) > 0
 
         volume_type = await OperatorsPlanarSlice.get_type()
@@ -400,7 +500,7 @@ class OperatorsPoints:
 
     @staticmethod
     def enabled(objects: dict) -> bool:
-        return schema_isa(cae.DataSet, objects)
+        return _has_active_prims(objects, _is_dataset_prim)
 
     @staticmethod
     @async_callback
@@ -408,7 +508,7 @@ class OperatorsPoints:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
         assert len(active_dataset_prims) > 0
 
         # Create points for each dataset individually
@@ -429,7 +529,7 @@ class OperatorsFaces:
 
     @staticmethod
     def enabled(objects: dict) -> bool:
-        return schema_isa(cae.DataSet, objects)
+        return _has_active_prims(objects, _is_dataset_prim)
 
     @staticmethod
     @async_callback
@@ -437,7 +537,7 @@ class OperatorsFaces:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
         assert len(active_dataset_prims) > 0
 
         # Create faces for each dataset individually
@@ -451,6 +551,36 @@ class OperatorsFaces:
         return created_paths
 
 
+class OperatorsIsoSurface:
+    @staticmethod
+    def show(objects: dict) -> bool:
+        return objects.get("stage") is not None
+
+    @staticmethod
+    def enabled(objects: dict) -> bool:
+        return _has_active_prims(objects, _is_dataset_prim)
+
+    @staticmethod
+    @async_callback
+    @select_result
+    async def onclick(objects: dict):
+        stage = objects.get("stage")
+        assert stage is not None, "missing stage"
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
+        assert len(active_dataset_prims) > 0
+
+        created_paths = []
+        for dataset_prim in active_dataset_prims:
+            name = f"IsoSurface_{dataset_prim.GetName()}"
+            prim_path = get_stage_next_free_path(stage, get_anchor_path(stage).AppendChild(name), False)
+            await execute_command(
+                "CreateCaeVizIsoSurface", dataset_path=str(dataset_prim.GetPath()), prim_path=prim_path
+            )
+            created_paths.append(prim_path)
+
+        return created_paths
+
+
 class OperatorsGlyphs:
 
     @staticmethod
@@ -459,7 +589,7 @@ class OperatorsGlyphs:
 
     @staticmethod
     def enabled(objects: dict) -> bool:
-        return schema_isa(cae.DataSet, objects)
+        return _has_active_prims(objects, _is_dataset_prim)
 
     @staticmethod
     @async_callback
@@ -467,7 +597,7 @@ class OperatorsGlyphs:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
         assert len(active_dataset_prims) > 0
 
         shape = await OperatorsGlyphs.get_shape()
@@ -504,7 +634,7 @@ class OperatorsStreamlines:
 
     @staticmethod
     def enabled(objects: dict) -> bool:
-        return schema_isa(cae.DataSet, objects)
+        return _has_active_prims(objects, _is_dataset_prim)
 
     @staticmethod
     @async_callback
@@ -512,7 +642,7 @@ class OperatorsStreamlines:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
         assert len(active_dataset_prims) > 0
 
         streamlines_type = await OperatorsStreamlines.get_streamlines_type()
@@ -551,7 +681,7 @@ class OperatorsVolume:
 
     @staticmethod
     def enabled(objects: dict) -> bool:
-        return schema_isa(cae.DataSet, objects)
+        return _has_active_prims(objects, _is_dataset_prim)
 
     @staticmethod
     @async_callback
@@ -559,7 +689,7 @@ class OperatorsVolume:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
         assert len(active_dataset_prims) > 0
 
         volume_type = await OperatorsVolume.get_volume_type()
@@ -582,7 +712,7 @@ class OperatorsVolume:
         dialog = TypeSelectionDialog(
             title="Choose Volume Type",
             label="Select the volume type:",
-            selections=[("Type:", ["irregular", "nanovdb"])],
+            selections=[("Type:", ["irregular", "nanovdb", "axisymmetric"])],
         )
         result = await dialog.exec()
         return result[0] if result else None
@@ -603,6 +733,12 @@ def get_operators_menu_dict():
                     "onclick_fn": OperatorsGlyphs.onclick,
                     "show_fn": OperatorsGlyphs.show,
                     "enabled_fn": OperatorsGlyphs.enabled,
+                },
+                {
+                    "name": "Iso Surface",
+                    "onclick_fn": OperatorsIsoSurface.onclick,
+                    "show_fn": OperatorsIsoSurface.show,
+                    "enabled_fn": OperatorsIsoSurface.enabled,
                 },
                 {
                     "name": "Planar Slices",
@@ -648,6 +784,11 @@ def get_sources_menu_dict():
                     "name": "Unit Sphere",
                     "onclick_fn": UnitSphere.onclick,
                     "show_fn": UnitSphere.show,
+                },
+                {
+                    "name": "Colormap",
+                    "onclick_fn": Colormap.onclick,
+                    "show_fn": Colormap.show,
                 },
                 {
                     "name": "Volume Slice",
@@ -703,7 +844,7 @@ class FlowEnvironment:
 
         dialog = ValidatedInputDialog(
             title="Choose Flow Layer",
-            label=f"Enter the layer number for the flow environment.",
+            label="Enter the layer number for the flow environment.",
             validator=validate_layer_number,
             default_value=str(get_next_available_layer_number(stage)),
             field_label="Layer:",
@@ -729,7 +870,7 @@ class FlowFuelInjectorSphere:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet) or prim.IsA(UsdGeom.Boundable))
+        active_prims = get_active_prims(objects, _is_boundable_or_dataset_prim)
         assert len(active_prims) > 0
 
         layer_number = await FlowFuelInjectorSphere.get_layer_selection(stage)
@@ -791,7 +932,7 @@ class FlowDatasetInjector:
     @staticmethod
     def enabled(objects: dict) -> bool:
         stage = objects.get("stage")
-        return schema_isa(cae.DataSet, objects) and stage and len(get_flow_layer_numbers(stage)) > 0
+        return bool(stage and _has_active_prims(objects, _is_dataset_prim) and len(get_flow_layer_numbers(stage)) > 0)
 
     @staticmethod
     @async_callback
@@ -799,7 +940,7 @@ class FlowDatasetInjector:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_dataset_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet))
+        active_dataset_prims = get_active_prims(objects, _is_dataset_prim)
         assert len(active_dataset_prims) > 0
 
         layer_number = await FlowFuelInjectorSphere.get_layer_selection(stage)
@@ -836,12 +977,7 @@ class FlowBoundary:
         stage = objects.get("stage")
         if not stage or len(get_flow_layer_numbers(stage)) == 0:
             return False
-
-        if schema_isa(cae.DataSet, objects):
-            return True
-
-        if schema_isa(UsdGeom.Boundable, objects):
-            return True
+        return _has_active_prims(objects, _is_boundable_or_dataset_prim)
 
     @staticmethod
     @async_callback
@@ -849,7 +985,7 @@ class FlowBoundary:
     async def onclick(objects: dict):
         stage = objects.get("stage")
         assert stage is not None, "missing stage"
-        active_prims = get_active_prims(objects, lambda prim: prim.IsA(cae.DataSet) or prim.IsA(UsdGeom.Boundable))
+        active_prims = get_active_prims(objects, _is_boundable_or_dataset_prim)
         assert len(active_prims) > 0
 
         layer_number = await FlowFuelInjectorSphere.get_layer_selection(stage)
@@ -884,10 +1020,18 @@ def _add_colormap_texture_api(objects: dict):
 
     from omni.cae.schema import viz as cae_viz
 
-    for prim in get_selected_prims(objects, lambda p: p.GetTypeName() == "Colormap"):
+    prims = get_selected_prims(objects, lambda p: p.GetTypeName() == "Colormap")
+    for prim in prims:
         api = cae_viz.ColormapTextureAPI.Apply(prim)
         if not api.GetIdentifierAttr().Get():
             api.GetIdentifierAttr().Set(uuid.uuid4().hex[:12])
+    if prims:
+        _request_property_window_rebuild()
+
+
+def can_apply_colormap_texture(objects: dict) -> bool:
+    prims = get_selected_prims(objects, lambda prim: prim.GetTypeName() == "Colormap")
+    return bool(prims) and all(can_apply_api_prim("CaeVizColormapTextureAPI", prim) for prim in prims)
 
 
 class ColormapCopyLutUrl:
@@ -905,6 +1049,23 @@ class ColormapCopyLutUrl:
         if prims:
             identifier = cae_viz.ColormapTextureAPI(prims[0]).GetIdentifierAttr().Get()
             omni.kit.clipboard.copy(get_dynamic_url_for_identifier(identifier))
+
+
+class ColormapCopyOpacityLutUrl:
+    @staticmethod
+    def show(objects: dict) -> bool:
+        return len(get_active_prims(objects, _colormap_has_texture_api)) > 0
+
+    @staticmethod
+    def onclick(objects: dict):
+        import omni.kit.clipboard
+        from omni.cae.schema import viz as cae_viz
+        from omni.cae.viz.colormap_texture_manager import get_dynamic_opacity_url_for_identifier
+
+        prims = get_active_prims(objects, _colormap_has_texture_api)
+        if prims:
+            identifier = cae_viz.ColormapTextureAPI(prims[0]).GetIdentifierAttr().Get()
+            omni.kit.clipboard.copy(get_dynamic_opacity_url_for_identifier(identifier))
 
 
 def get_flow_menu_dict():
@@ -966,17 +1127,27 @@ def get_field_selection_suggestions(prims: list[Usd.Prim]) -> list[str]:
     for prim in prims:
         if prim.HasAPI(cae_viz.FacesAPI):
             suggestions.append("colors")
+            suggestions.append("opacity")
+        if prim.HasAPI(cae_viz.IsoSurfaceAPI):
+            suggestions.append("contour")
+            suggestions.append("colors")
+            suggestions.append("opacity")
         if prim.HasAPI(cae_viz.StreamlinesAPI):
             suggestions.append("colors")
+            suggestions.append("opacity")
             suggestions.append("velocities")
             suggestions.append("widths")
         if prim.HasAPI(cae_viz.PointsAPI):
             suggestions.append("colors")
+            suggestions.append("opacity")
             suggestions.append("widths")
         if prim.HasAPI(cae_viz.GlyphsAPI):
             suggestions.append("colors")
+            suggestions.append("opacity")
             suggestions.append("orientations")
             suggestions.append("scales")
+        if prim.HasAPI(cae_viz.PlanarSliceAPI):
+            suggestions.append("opacity")
         if prim.HasAPI(cae_viz.IndeXVolumeAPI):
             suggestions.append("colors")
         if prim.IsA("FlowEmitterNanoVdb"):
@@ -1045,6 +1216,30 @@ def get_add_menu_dict():
                     "show_fn": partial(can_apply_api, "CaeVizDatasetSelectionAPI"),
                 },
                 {
+                    "name": "Dataset Axisymmetric Representation",
+                    "onclick_fn": partial(
+                        add_api,
+                        Usd.Typed,
+                        "CaeVizDatasetAxisymmetricRepresentationAPI",
+                        suggestions_provider=lambda prims: get_dependent_api_suggestions(
+                            prims, "CaeVizDatasetSelectionAPI"
+                        ),
+                    ),
+                    "show_fn": partial(can_apply_api, "CaeVizDatasetAxisymmetricRepresentationAPI"),
+                },
+                {
+                    "name": "Dataset Dual",
+                    "onclick_fn": partial(
+                        add_api,
+                        Usd.Typed,
+                        "CaeVizDatasetDualAPI",
+                        suggestions_provider=lambda prims: get_dependent_api_suggestions(
+                            prims, "CaeVizDatasetSelectionAPI"
+                        ),
+                    ),
+                    "show_fn": partial(can_apply_api, "CaeVizDatasetDualAPI"),
+                },
+                {
                     "name": "Dataset Gaussian Splatting",
                     "onclick_fn": partial(
                         add_api,
@@ -1055,6 +1250,18 @@ def get_add_menu_dict():
                         ),
                     ),
                     "show_fn": partial(can_apply_api, "CaeVizDatasetGaussianSplattingAPI"),
+                },
+                {
+                    "name": "Dataset Voronoi Point Cloud",
+                    "onclick_fn": partial(
+                        add_api,
+                        Usd.Typed,
+                        "CaeVizDatasetVoronoiPointCloudAPI",
+                        suggestions_provider=lambda prims: get_dependent_api_suggestions(
+                            prims, "CaeVizDatasetSelectionAPI"
+                        ),
+                    ),
+                    "show_fn": partial(can_apply_api, "CaeVizDatasetVoronoiPointCloudAPI"),
                 },
                 {
                     "name": "Dataset Voxelization",
@@ -1093,6 +1300,17 @@ def get_add_menu_dict():
                     "show_fn": partial(can_apply_api, "CaeVizDatasetSubsetAPI"),
                 },
                 {
+                    "name": "Array Expression",
+                    "onclick_fn": partial(
+                        add_api,
+                        Usd.Typed,
+                        "CaeArrayExpressionAPI",
+                        validator=validate_array_expression_name,
+                        prim_filter=is_scientific_field_owner,
+                    ),
+                    "show_fn": can_apply_array_expression,
+                },
+                {
                     "name": "Field Selection",
                     "onclick_fn": partial(
                         add_api,
@@ -1127,9 +1345,9 @@ def get_add_menu_dict():
                     "show_fn": partial(can_apply_api, "CaeVizFieldThresholdingAPI"),
                 },
                 {
-                    "name": "Colormap Texture",
+                    "name": "Colormap Textures (Color + Opacity)",
                     "onclick_fn": _add_colormap_texture_api,
-                    "show_fn": partial(can_apply_api, "CaeVizColormapTextureAPI"),
+                    "show_fn": can_apply_colormap_texture,
                 },
                 # {
                 #     "name": "Block List",

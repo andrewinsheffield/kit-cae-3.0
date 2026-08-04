@@ -15,6 +15,15 @@
 local schemas = {
     "omniCae",
     "omniCaeSids",
+    "omniSci",
+    "omniSciCae",
+    "omniSciFileFormatArgs",
+    "omniSciReservoir",
+    "omniSciCgns",
+    "omniSciEdem",
+    "omniSciEnSight",
+    "omniSciOpenFoam",
+    "omniSciVtk",
     "omniCaeNumPy",
     "omniCaeNvdb",
     "omniCaeHdf5",
@@ -66,28 +75,32 @@ for _, schema in ipairs(schemas) do
                 -- overrides to "Off" for regular extensions. usd_plugin() doesn't, so
                 -- we must override here to avoid CRT heap mismatch and heap corruption.
                 staticruntime "Off"
+                targetdir("%{root}/_build/%{platform}/%{config}/schemas/usd/plugin")
+                targetprefix("")
                 filter { "system:linux" }
                     buildoptions { "-fvisibility=default" }
                 filter { "system:windows" }
                     -- Suppress conversion warnings from USD headers (treated as errors by Kit's build)
                     -- C4244: conversion from 'double' to 'float', possible loss of data
+                    -- C4251: STL member needs dll-interface to be used by clients of class
                     -- C4305: truncation from 'double' to 'float'
-                    disablewarnings { "4244", "4305" }
+                    disablewarnings { "4244", "4251", "4305" }
                 filter {}
 
             -- Python binding projects still need an explicit premake include path.
             project("_"..schema)
                 staticruntime "Off"
+                targetdir("%{root}/_build/%{platform}/%{config}/schemas/lib/python/pxr/"..schema:gsub("^%l", string.upper))
                 includedirs {
                     "%{root}/_build/generated/schemas",
                 }
                 filter { "system:windows" }
-                    -- Suppress conversion warnings from USD headers (treated as errors by Kit's build)
-                    disablewarnings { "4244", "4305" }
+                    -- Suppress warnings from USD headers (treated as errors by Kit's build)
+                    disablewarnings { "4244", "4251", "4305" }
                     -- Python bindings need to link against base schema libraries for symbol resolution
                     -- (Linux resolves these through shared object dependencies, Windows needs explicit links)
                     if schema_base_deps[schema] then
-                        libdirs { "%{root}/_build/%{platform}/%{config}/schemas/lib" }
+                        libdirs { "%{root}/_build/%{platform}/%{config}/schemas/usd/plugin" }
                         links(schema_base_deps[schema])
                     end
                 filter {}

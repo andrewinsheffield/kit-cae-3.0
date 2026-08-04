@@ -8,4 +8,5 @@ repo_build.prebuild_link {
     { "data", ext.target_dir.."/data" },
     { "docs", ext.target_dir.."/docs" },
     { "%{root}/_build/target-deps/pip_prebundle", ext.target_dir.."/pip_prebundle" },
+    { "%{root}/_build/target-deps/warp_simdata", ext.target_dir.."/warp_simdata" },
 }

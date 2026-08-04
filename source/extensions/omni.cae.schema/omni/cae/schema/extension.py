@@ -23,6 +23,37 @@ from pxr import Plug, Usd  # noqa: F401 -- Usd import ensures base class wrapper
 logger = getLogger(__name__)
 
 
+def _plugin_sort_key(plugin):
+    name = plugin.name
+    return (0 if name == "omniCae" else 1, name)
+
+
+def _path_is_under(path, root):
+    """Return true when path is inside root, after normalizing both paths."""
+    try:
+        resolved_path = Path(path).resolve()
+        resolved_root = Path(root).resolve()
+    except OSError:
+        resolved_path = Path(path).absolute()
+        resolved_root = Path(root).absolute()
+
+    try:
+        resolved_path.relative_to(resolved_root)
+        return True
+    except ValueError:
+        if sys.platform != "win32":
+            return False
+
+    # Windows paths can differ only by case depending on how USD registered the
+    # plugin. Normalize as a fallback so selection stays stable.
+    try:
+        path_str = os.path.normcase(str(resolved_path))
+        root_str = os.path.normcase(str(resolved_root))
+        return os.path.commonpath([path_str, root_str]) == root_str
+    except ValueError:
+        return False
+
+
 def _get_schema_plugins(plugin_dir, registered_plugins):
     """Return the USD schema plugins that belong to this extension.
 
@@ -32,20 +63,18 @@ def _get_schema_plugins(plugin_dir, registered_plugins):
     registry and select plugins whose resolved library path lives under this
     extension's usd/plugin directory.
     """
-    plugins = list(registered_plugins)
-    if plugins:
-        return plugins
+    registered = list(registered_plugins)
 
-    # RegisterPlugins() may return an empty list if another path already
-    # registered these plugins. In that case, recover the plugins that live
-    # under this extension so startup still preloads them.
-    try:
-        return [plugin for plugin in Plug.Registry().GetAllPlugins() if Path(plugin.path).is_relative_to(plugin_dir)]
-    except AttributeError:
-        plugin_dir = plugin_dir.resolve()
-        return [
-            plugin for plugin in Plug.Registry().GetAllPlugins() if plugin_dir in Path(plugin.path).resolve().parents
-        ]
+    # RegisterPlugins() may return only the plugins newly registered by this
+    # call. If another extension or an earlier startup pass already registered
+    # one of these plugInfo files, recover it from USD's registry as well.
+    registry_plugins = [plugin for plugin in Plug.Registry().GetAllPlugins() if _path_is_under(plugin.path, plugin_dir)]
+
+    plugins_by_key = {}
+    for plugin in registered + registry_plugins:
+        plugins_by_key.setdefault((plugin.name, str(Path(plugin.path).resolve())), plugin)
+
+    return list(plugins_by_key.values())
 
 
 def _preload_registered_plugin_libraries(plugins):
@@ -55,7 +84,7 @@ def _preload_registered_plugin_libraries(plugins):
     actual schema library is normally loaded lazily by USD when a type from that
     plugin is needed. That is too late for native Kit plugins such as
     omni.cae.data.plugin, which have direct dynamic-library dependencies on
-    generated schema libraries like libomniCae.so.
+    generated schema libraries like omniCae.so.
 
     Do not call PlugPlugin.Load() here. In this Kit packaging layout USD tries
     to import generated Python modules as usd.python.pxr.<SchemaName>, which is
@@ -64,20 +93,15 @@ def _preload_registered_plugin_libraries(plugins):
     shared library it needs without asking USD to import Python wrappers.
 
     On Linux, RTLD_GLOBAL is important: it lets later native plugin loads
-    resolve DT_NEEDED entries such as libomniCae.so by SONAME against the schema
+    resolve DT_NEEDED entries such as omniCae.so by SONAME against the schema
     library already loaded here. On Windows, these flags are ignored by ctypes,
     but loading the DLL by absolute path is still useful as an explicit preload.
     Keep the returned CDLL handles alive for the lifetime of the extension so
     the loader does not release the libraries early.
     """
-
-    def _sort_key(plugin):
-        name = plugin.name
-        return (0 if name == "omniCae" else 1, name)
-
     handles = []
     mode = getattr(os, "RTLD_NOW", 0) | getattr(os, "RTLD_GLOBAL", 0)
-    for plugin in sorted(plugins, key=_sort_key):
+    for plugin in sorted(plugins, key=_plugin_sort_key):
         if plugin.isLoaded:
             logger.info("USD schema plugin '%s' is already loaded from '%s'", plugin.name, plugin.path)
             continue
@@ -97,28 +121,26 @@ def _load_usd_plugins(ext_id):
     plugin_dir = Path(get_app().get_extension_manager().get_extension_path(ext_id)) / "usd" / "plugin"
 
     handles = []
+    if not plugin_dir.is_dir():
+        logger.error("USD schema plugin directory does not exist: '%s'", plugin_dir)
+        return handles
+
     # On Windows, loading a schema DLL by absolute path does not automatically
-    # make sibling schema DLL directories available for dependency resolution.
-    # Add each USD plugin directory to the process DLL search path before the
-    # explicit preloads below and before any generated Python bindings are
-    # imported. This lets dependencies such as `omniCaeViz.dll -> omniCae.dll`
-    # and bindings such as `usd/python/pxr/OmniCaeViz/_omniCaeViz.pyd ->
+    # make sibling schema DLLs available for dependency resolution. Schema DLLs
+    # are packaged directly under usd/plugin, so add that root before the
+    # explicit preloads below and before generated Python bindings are imported.
+    # This lets dependencies such as `omniCaeViz.dll -> omniCae.dll` and
+    # bindings such as `lib/python/pxr/OmniCaeViz/_omniCaeViz.pyd ->
     # omniCaeViz.dll` resolve against the packaged schema libraries.
     #
     # Keep the returned add_dll_directory() handles alive for the lifetime of
     # the extension; dropping them removes the directories from the DLL search
     # path.
     if sys.platform == "win32":
-        resource_dirs = sorted(path for path in plugin_dir.glob("*/resources") if (path / "plugInfo.json").is_file())
-        if not resource_dirs:
-            logger.error("No USD schema plugins found under '%s'", plugin_dir)
-            return handles
-        for resource_dir in resource_dirs:
-            dll_dir = resource_dir.parent
-            logger.info("Adding schema DLL search path '%s'", dll_dir)
-            handles.append(os.add_dll_directory(str(dll_dir)))
+        logger.info("Adding schema DLL search path '%s'", plugin_dir)
+        handles.append(os.add_dll_directory(str(plugin_dir)))
 
-    logger.info("Registering USD plugin from '%s'", plugin_dir)
+    logger.info("Registering USD plugins from '%s'", plugin_dir)
     result = Plug.Registry().RegisterPlugins(str(plugin_dir))
     plugins = _get_schema_plugins(plugin_dir, result)
     if not plugins:

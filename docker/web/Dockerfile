@@ -18,7 +18,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN echo 'registry=https://registry.npmjs.org/' > /root/.npmrc && \
-    echo '@nvidia:registry=https://edge.urm.nvidia.com/artifactory/api/npm/omniverse-client-npm-local/' >> /root/.npmrc
+    echo '@nvidia:registry=https://edge.urm.nvidia.com/artifactory/api/npm/omniverse-client-npm/' >> /root/.npmrc
 
 RUN npm install -g @nvidia/create-ov-web-sample@1.13.4 --ignore-scripts
 

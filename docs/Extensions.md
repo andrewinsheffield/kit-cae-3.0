@@ -1,17 +1,19 @@
 # Extensions Overview
 
 Kit-CAE is composed of modular Omniverse extensions organised into the following categories.
+This catalog covers every `config/extension.toml` under `source/extensions` and
+`source/legacy_extensions`.
 
 | Category | Extensions |
 |----------|-----------|
-| [USD Schemas](#usd-schemas) | `omni.cae.schema` |
-| [Data Infrastructure](#data-infrastructure) | `omni.cae.data`, `omni.cae.dav` |
-| [Data Delegates](#data-delegates) | `omni.cae.delegate.*` |
-| [File Formats & Importers](#file-formats--importers) | `omni.cae.file_format.cgns`, `omni.cae.importer.*` |
+| [USD Schemas](#usd-schemas) | `omni.cae.schema`, schemas supplied by `omni.cae.usd_plugins` |
+| [Data Infrastructure](#data-infrastructure) | `omni.cae.core`, `omni.cae.simdata` |
+| [USD File Formats & Importers](#usd-file-formats--importers) | `omni.cae.usd_plugins`, `omni.cae.usd_plugins_importers` |
 | [Visualization](#visualization) | `omni.cae.viz`, `omni.cae.index` |
 | [UI](#ui) | `omni.cae.context_menu`, `omni.cae.property.bundle`, `omni.cae.widget.stage_icons` |
-| [Utilities](#utilities) | `omni.cae.bundle`, `omni.cae.exVars`, `omni.cae.testing`, `omni.cae.pip_prebundle` |
-| [Native Libraries](#native-libraries) | `omni.cae.cgns_libs`, `omni.cae.dav_libs`, `omni.cae.hdf5_libs`, `omni.cae.vtk_libs` |
+| [Utilities](#utilities) | `omni.cae.bundle`, `omni.cae.exVars`, `omni.cae.startup`, `omni.cae.testing`, `omni.cae.pip_prebundle` |
+| [Legacy Compatibility](#legacy-compatibility) | `omni.cae.legacy.bundle`, `omni.cae.data`, `omni.cae.simdata.legacy`, `omni.cae.property.legacy`, `omni.cae.delegate.*` |
+| [Legacy Native Libraries](#legacy-native-libraries) | `omni.cae.cgns_libs`, `omni.cae.hdf5_libs` |
 
 ---
 
@@ -19,93 +21,114 @@ Kit-CAE is composed of modular Omniverse extensions organised into the following
 
 #### [`omni.cae.schema`](../source/extensions/omni.cae.schema/)
 
-Loads the CAE USD schemas into Omniverse. USD plugins must be registered early during initialisation; this extension discovers the copied schema plugins under its `usd/plugin/*/resources` tree and registers them at startup. It exposes the core `CaeDataSet` and `CaeFieldArray` prim types plus all associated API schemas described in [USD Schemas](./UsdSchemas.md).
+Loads the Kit-CAE-owned visualization and compatibility schemas into Omniverse. USD plugins must be registered early during initialisation; this extension registers its `usd/plugin` root at startup, where the top-level `plugInfo.json` includes each plugin's `resources` directory.
+
+The active scientific-data schemas (`OmniSciDataset`, `OmniSciArrayAPI`, `OmniSciFieldAPI`, and format-specific APIs) are supplied by the prebuilt runtime registered by `omni.cae.usd_plugins`. The older `CaeDataSet` and `CaeFieldArray` schemas remain available for legacy stages. See [Scientific Data Schemas](./UsdSchemas.md) for the boundary between the two models.
 
 ---
 
 ## Data Infrastructure
 
-#### [`omni.cae.data`](../source/extensions/omni.cae.data/)
+#### [`omni.cae.core`](../source/extensions/omni.cae.core/)
 
-Core extension providing the **Data Delegate API** — an extensible mechanism for reading data from `CaeFieldArray` prims. Extensions register delegates for specific `CaeFieldArray` subtypes; `omni.cae.data` dispatches read requests to the right delegate at runtime. See [Data Delegate API](./DataDelegate.md).
+Shared active Python utilities for USD traversal, array conversion, progress reporting, command helpers, cache invalidation, and Warp initialization. Active USD-plugin and SimData/Viz workflows depend on this extension instead of the deprecated Data Delegate API.
 
-#### [`omni.cae.dav`](../source/extensions/omni.cae.dav/)
+#### [`omni.cae.simdata`](../source/extensions/omni.cae.simdata/)
 
-Provides DAV-specific data processing algorithms and operators. DAV is the internal compute library used by `omni.cae.viz` for CAE algorithms (streamlines, face extraction, etc.).
+Provides Warp SimData-backed data processing operators used by `omni.cae.viz` for visualization operations such as streamlines, face extraction, point splats, and voxelization.
 
 ---
 
-## Data Delegates
+## Legacy Compatibility
 
-These extensions register delegates with `omni.cae.data` to handle reading data from specific `CaeFieldArray` subtypes and file formats.
+These extensions live under `source/legacy_extensions` and support old
+`CaeDataSet` / `CaeFieldArray` stages. New workflows should use the active
+OmniSci extensions described above.
 
-#### [`omni.cae.delegate.cgns`](../source/extensions/omni.cae.delegate.cgns/)
+### Compatibility runtime and UI
+
+#### [`omni.cae.legacy.bundle`](../source/legacy_extensions/omni.cae.legacy.bundle/)
+
+Convenience bundle for the deprecated Data Delegate runtime, legacy SimData
+converters, legacy Property widgets, and all legacy file delegates. Enable this
+only for stages that still require delegate-backed field arrays.
+
+#### [`omni.cae.data`](../source/legacy_extensions/omni.cae.data/)
+
+Deprecated compatibility extension providing the **Data Delegate API** for legacy stages. New file-format and lazy-loading work belongs in `omni.cae.usd_plugins` and active consumers should use `omni.cae.core`.
+
+#### [`omni.cae.simdata.legacy`](../source/legacy_extensions/omni.cae.simdata.legacy/)
+
+Deprecated SimData converter commands for legacy datasets. The active
+`omni.cae.simdata` extension handles OmniSci datasets directly.
+
+#### [`omni.cae.property.legacy`](../source/legacy_extensions/omni.cae.property.legacy/)
+
+Deprecated Property window widgets for inspecting delegate-backed
+`CaeDataSet` and `CaeFieldArray` prims.
+
+### File delegates
+
+The following extensions register per-format array readers with
+`omni.cae.data`.
+
+#### [`omni.cae.delegate.cgns`](../source/legacy_extensions/omni.cae.delegate.cgns/)
 
 Reads data from `CaeCgnsFieldArray` prims — field arrays stored in CGNS (`.cgns`) files.
 
-#### [`omni.cae.delegate.hdf5`](../source/extensions/omni.cae.delegate.hdf5/)
+#### [`omni.cae.delegate.hdf5`](../source/legacy_extensions/omni.cae.delegate.hdf5/)
 
 Reads data from `CaeHdf5FieldArray` prims — field arrays stored in HDF5 files.
 
-#### [`omni.cae.delegate.npz`](../source/extensions/omni.cae.delegate.npz/)
+#### [`omni.cae.delegate.npz`](../source/legacy_extensions/omni.cae.delegate.npz/)
 
 Reads data from `CaeNumPyFieldArray` prims — field arrays stored in NumPy `.npy` / `.npz` files. Pure-Python implementation.
 
-#### [`omni.cae.delegate.vtk`](../source/extensions/omni.cae.delegate.vtk/)
+#### [`omni.cae.delegate.nvdb`](../source/legacy_extensions/omni.cae.delegate.nvdb/)
+
+Reads NanoVDB (`.nvdb`) volumes referenced by legacy CAE field-array prims.
+
+#### [`omni.cae.delegate.vtk`](../source/legacy_extensions/omni.cae.delegate.vtk/)
 
 Reads data from VTK field arrays stored in `.vti`, `.vtu`, `.vts`, `.vtp`, and `.vtk` files.
 
-#### [`omni.cae.delegate.ensight`](../source/extensions/omni.cae.delegate.ensight/)
+#### [`omni.cae.delegate.ensight`](../source/legacy_extensions/omni.cae.delegate.ensight/)
 
 Reads data from EnSight Gold datasets.
 
-#### [`omni.cae.delegate.openfoam`](../source/extensions/omni.cae.delegate.openfoam/)
+#### [`omni.cae.delegate.openfoam`](../source/legacy_extensions/omni.cae.delegate.openfoam/)
 
 Reads data from OpenFOAM mesh and field files.
 
-#### [`omni.cae.delegate.trimesh`](../source/extensions/omni.cae.delegate.trimesh/)
+#### [`omni.cae.delegate.trimesh`](../source/legacy_extensions/omni.cae.delegate.trimesh/)
 
 Reads surface mesh formats (STL, OBJ, PLY, OFF, GLTF/GLB, and others) via the `trimesh` Python library.
 
-#### [`omni.cae.delegate.edem`](../source/extensions/omni.cae.delegate.edem/)
+#### [`omni.cae.delegate.edem`](../source/legacy_extensions/omni.cae.delegate.edem/)
 
 Reads EDEM particle simulation datasets from HDF5 files.
 
 ---
 
-## File Formats & Importers
+## USD File Formats & Importers
 
-#### [`omni.cae.file_format.cgns`](../source/extensions/omni.cae.file_format.cgns/)
+#### [`omni.cae.usd_plugins`](../source/extensions/omni.cae.usd_plugins/)
 
-USD **file format plugin** that allows `.cgns` files to be opened directly in a USD stage. When a CGNS file is referenced, USD calls this plugin to produce the corresponding prim hierarchy with `CaeCgnsFieldArray` prims.
+Registers the CAE USD schema and file-format plugin runtime. The extension stages the prebuilt
+`cae_openusd_plugins` Packman package from `_build/target-deps/cae_openusd_plugins`, preserving its
+`plugin/usd` and `lib/python` install-tree layout so the package's Python bootstrap can register
+the plugin root and extend the active `pxr` namespace. This extension replaces the retired
+standalone `omni.cae.file_format.cgns` extension.
 
-### Importers
+The packaged runtime provides direct USD loading for CGNS, EDEM, EnSight, Eclipse reservoir, FLASH
+AMR, NumPy, NanoVDB, OpenFOAM, VTK, and Trimesh files.
 
-These extensions add entries to the **File → Import** menu for their respective formats. Each importer creates the appropriate `CaeDataSet` and `CaeFieldArray` prim hierarchy in the active stage.
+#### [`omni.cae.usd_plugins_importers`](../source/extensions/omni.cae.usd_plugins_importers/)
 
-#### [`omni.cae.importer.cgns`](../source/extensions/omni.cae.importer.cgns/)
-
-Imports CGNS (`.cgns`) files.
-
-#### [`omni.cae.importer.vtk`](../source/extensions/omni.cae.importer.vtk/)
-
-Imports VTK files (`.vtk`, `.vti`, `.vtu`).
-
-#### [`omni.cae.importer.ensight`](../source/extensions/omni.cae.importer.ensight/)
-
-Imports EnSight Gold CASE (`.case`) files.
-
-#### [`omni.cae.importer.npz`](../source/extensions/omni.cae.importer.npz/)
-
-Imports NumPy `.npz` / `.npy` files, typically used for point cloud data.
-
-#### [`omni.cae.importer.openfoam`](../source/extensions/omni.cae.importer.openfoam/)
-
-Imports OpenFOAM case directories.
-
-#### [`omni.cae.importer.edem`](../source/extensions/omni.cae.importer.edem/)
-
-Imports EDEM particle simulation datasets.
+Adds asset-importer entries and the shared `import_to_stage(path, prim_path, **args)` helper for
+files handled by `omni.cae.usd_plugins`. Importers author payload prims plus matching
+`OmniSciFileFormatArgs*` API schemas so the source file remains in its native format. This extension
+replaces the retired per-format `omni.cae.importer.*` extensions.
 
 ---
 
@@ -135,7 +158,7 @@ Custom property panel widgets for CAE schema attributes — provides richer UI c
 
 #### [`omni.cae.widget.stage_icons`](../source/extensions/omni.cae.widget.stage_icons/)
 
-Custom icons for CAE prim types (`CaeDataSet`, `CaeFieldArray`, etc.) in the Stage widget.
+Custom icons for active `OmniSciDataset` prims and legacy CAE prim types in the Stage widget.
 
 ---
 
@@ -143,11 +166,20 @@ Custom icons for CAE prim types (`CaeDataSet`, `CaeFieldArray`, etc.) in the Sta
 
 #### [`omni.cae.bundle`](../source/extensions/omni.cae.bundle/)
 
-Meta-extension that depends on all Kit-CAE extensions. Enabling this single extension brings in the full CAE stack — useful as the single dependency in application `.kit` files.
+Meta-extension that depends on the active Kit-CAE extensions. Enabling this
+single extension brings in the current CAE stack — useful as the single
+dependency in application `.kit` files. Legacy compatibility extensions are
+not enabled by this bundle.
 
 #### [`omni.cae.exVars`](../source/extensions/omni.cae.exVars/)
 
 Reads `expressionVariables` from the command line and injects them into all session layers at stage load. Useful for parameterising USD files (e.g. data paths) at launch time without editing assets.
+
+#### [`omni.cae.startup`](../source/extensions/omni.cae.startup/)
+
+Opens the USD file configured by `exts."omni.cae.startup".usdFile` after RTX
+delivers its first frame. This allows automated launches to defer stage loading
+until the renderer is ready.
 
 #### [`omni.cae.testing`](../source/extensions/omni.cae.testing/)
 
@@ -159,31 +191,13 @@ Bundles Python pip packages required by other CAE extensions so they are availab
 
 ---
 
-## Native Libraries
+## Legacy Native Libraries
 
-These are internal extensions that ship compiled native libraries. They have no public Python API and exist only to satisfy dependencies of other extensions.
+These internal extensions live under `source/legacy_extensions` and ship compiled native libraries
+needed only by the legacy data delegates. They have no public Python API. Active file-format support
+comes from `omni.cae.usd_plugins` and does not depend on these extensions.
 
 | Extension | Libraries provided |
 |-----------|-------------------|
-| [`omni.cae.cgns_libs`](../source/extensions/omni.cae.cgns_libs/) | CGNS C library |
-| [`omni.cae.hdf5_libs`](../source/extensions/omni.cae.hdf5_libs/) | HDF5 C library |
-| [`omni.cae.dav_libs`](../source/extensions/omni.cae.dav_libs/) | DAV compute library |
-| [`omni.cae.vtk_libs`](../source/extensions/omni.cae.vtk_libs/) | VTK libraries |
-
----
-
-## Legacy Extensions
-
-The following extensions under `source/legacy_extensions/` are considered legacy and will be removed in a future release. They implement an older algorithm operator pattern that has been superseded by `omni.cae.viz` and the OmniCaeViz schemas.
-
-- `omni.cae.algorithms.core`
-- `omni.cae.algorithms.index`
-- `omni.cae.algorithms.schema`
-- `omni.cae.algorithms.warp`
-- `omni.cae.experimental.dav`
-- `omni.cae.flow`
-- `omni.cae.material_library`
-- `omni.cae.schema.simh`
-- `omni.cae.sids`
-- `omni.cae.simh`
-- `omni.cae.vtk`
+| [`omni.cae.cgns_libs`](../source/legacy_extensions/omni.cae.cgns_libs/) | CGNS C library |
+| [`omni.cae.hdf5_libs`](../source/legacy_extensions/omni.cae.hdf5_libs/) | HDF5 C library |

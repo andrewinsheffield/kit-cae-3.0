@@ -19,9 +19,6 @@ Extends material options to include MDL file support.
 - Subdivision part count: 1
 - Composite rendering: Enabled
 
-### Hydra/Fabric Settings
-Enables transform reading from Fabric in render delegate for usdrt-based algorithms.
-
 ### Flow Settings
 Configures voxelization parameters for velocity fields.
 

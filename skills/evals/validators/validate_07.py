@@ -3,18 +3,20 @@ Eval 07 Validator: Field Statistics
 Runs inside Kit-CAE via --exec. Imports StaticMixer.cgns, computes Pressure
 statistics, and validates values against ground truth.
 """
+
 import asyncio
 import json
 import math
 import os
 
+import numpy as np
 import omni.kit.app
 import omni.usd
-from omni.cae.data.commands import execute_command
-from omni.cae.schema import cae
+from omni.cae.core import array_utils, usd_utils
 from omni.cae.testing import wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
-from pxr import Tf, Usd
+from pxr import OmniSci, Usd
 
 
 async def main():
@@ -23,7 +25,6 @@ async def main():
 
     # 1. Import
     try:
-        from omni.cae.importer.cgns import import_to_stage
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data")
         await import_to_stage(os.path.join(data_dir, "StaticMixer.cgns"), "/World/StaticMixer")
         await wait_for_update(20)
@@ -36,11 +37,18 @@ async def main():
 
     stage = get_context().get_stage()
 
-    # 2. Find Pressure field
-    pressure_path = "/World/StaticMixer/Base/StaticMixer/Flow_Solution/Pressure"
-    pressure_prim = stage.GetPrimAtPath(pressure_path)
-    prim_found = bool(pressure_prim and pressure_prim.IsValid())
-    checks.append({"name": "pressure_field_found", "pass": prim_found, "detail": pressure_path})
+    # 2. Find an OmniSci dataset carrying Pressure.
+    datasets = [prim for prim in stage.Traverse() if prim.IsA(OmniSci.Dataset)]
+    pressure_datasets = [prim for prim in datasets if "Pressure" in usd_utils.get_instances(prim, "OmniSciFieldAPI")]
+    pressure_dataset = pressure_datasets[0] if pressure_datasets else None
+    prim_found = pressure_dataset is not None
+    checks.append(
+        {
+            "name": "pressure_field_found",
+            "pass": prim_found,
+            "detail": str(pressure_dataset.GetPath()) if pressure_dataset else "Pressure not found",
+        }
+    )
 
     if not prim_found:
         _emit_result("07_field_statistics", checks)
@@ -49,29 +57,37 @@ async def main():
 
     # 3. Compute statistics
     try:
-        from omni.cae.data import array_utils, usd_utils
-
-        farray = await usd_utils.get_array(pressure_prim, Usd.TimeCode.EarliestTime())
-        checks.append({"name": "array_loaded", "pass": farray is not None,
-                        "detail": f"shape={farray.shape} dtype={farray.dtype}"})
+        attr = pressure_dataset.GetAttribute("omni:sci:array:Pressure:value")
+        value = await asyncio.to_thread(attr.Get, Usd.TimeCode.EarliestTime())
+        farray = np.asarray(value)
+        checks.append(
+            {"name": "array_loaded", "pass": farray is not None, "detail": f"shape={farray.shape} dtype={farray.dtype}"}
+        )
 
         # Get ranges
         ranges = array_utils.get_componentwise_ranges(farray)
         has_range = len(ranges) > 0
-        checks.append({"name": "range_computed", "pass": has_range,
-                        "detail": f"range={ranges[0] if ranges else 'N/A'}"})
+        checks.append(
+            {"name": "range_computed", "pass": has_range, "detail": f"range={ranges[0] if ranges else 'N/A'}"}
+        )
 
         # Get scalar stats
         stats = array_utils.get_scalar_stats(farray, num_bins=32)
-        checks.append({"name": "stats_computed", "pass": stats is not None,
-                        "detail": f"keys={list(stats.keys()) if stats else 'None'}"})
+        checks.append(
+            {
+                "name": "stats_computed",
+                "pass": stats is not None,
+                "detail": f"keys={list(stats.keys()) if stats else 'None'}",
+            }
+        )
 
         # Validate required keys
         required_keys = ["min", "max", "mean", "median", "counts", "bin_edges"]
         for key in required_keys:
             has_key = key in stats if stats else False
-            checks.append({"name": f"has_{key}", "pass": has_key,
-                            "detail": f"{key}={'present' if has_key else 'missing'}"})
+            checks.append(
+                {"name": f"has_{key}", "pass": has_key, "detail": f"{key}={'present' if has_key else 'missing'}"}
+            )
 
         # Validate values are finite
         if stats:
@@ -79,40 +95,54 @@ async def main():
                 if key in stats:
                     val = float(stats[key])
                     is_finite = math.isfinite(val)
-                    checks.append({"name": f"{key}_finite", "pass": is_finite,
-                                    "detail": f"{key}={val}"})
+                    checks.append({"name": f"{key}_finite", "pass": is_finite, "detail": f"{key}={val}"})
 
             # Validate min <= median <= max
             if all(k in stats for k in ["min", "max", "median"]):
                 ordering_ok = float(stats["min"]) <= float(stats["median"]) <= float(stats["max"])
-                checks.append({"name": "ordering_valid", "pass": ordering_ok,
-                                "detail": f"min={stats['min']} median={stats['median']} max={stats['max']}"})
+                checks.append(
+                    {
+                        "name": "ordering_valid",
+                        "pass": ordering_ok,
+                        "detail": f"min={stats['min']} median={stats['median']} max={stats['max']}",
+                    }
+                )
 
             # Validate min <= mean <= max
             if all(k in stats for k in ["min", "max", "mean"]):
                 mean_ok = float(stats["min"]) <= float(stats["mean"]) <= float(stats["max"])
-                checks.append({"name": "mean_in_range", "pass": mean_ok,
-                                "detail": f"min={stats['min']} mean={stats['mean']} max={stats['max']}"})
+                checks.append(
+                    {
+                        "name": "mean_in_range",
+                        "pass": mean_ok,
+                        "detail": f"min={stats['min']} mean={stats['mean']} max={stats['max']}",
+                    }
+                )
 
             # Validate histogram
             if "counts" in stats and "bin_edges" in stats:
                 counts = stats["counts"]
                 edges = stats["bin_edges"]
                 hist_ok = len(counts) == 32 and len(edges) == 33
-                checks.append({"name": "histogram_shape", "pass": hist_ok,
-                                "detail": f"counts={len(counts)} edges={len(edges)}"})
+                checks.append(
+                    {"name": "histogram_shape", "pass": hist_ok, "detail": f"counts={len(counts)} edges={len(edges)}"}
+                )
 
                 # All counts non-negative
                 counts_ok = all(c >= 0 for c in counts)
-                checks.append({"name": "counts_nonneg", "pass": counts_ok,
-                                "detail": f"min_count={min(counts)}"})
+                checks.append({"name": "counts_nonneg", "pass": counts_ok, "detail": f"min_count={min(counts)}"})
 
                 # Total count should approximately match array size (±1 for bin edge rounding)
                 total = sum(counts)
                 shape_size = farray.shape[0]
                 count_ok = abs(total - shape_size) <= 1
-                checks.append({"name": "counts_sum", "pass": count_ok,
-                                "detail": f"sum={total} expected={shape_size} (tolerance ±1)"})
+                checks.append(
+                    {
+                        "name": "counts_sum",
+                        "pass": count_ok,
+                        "detail": f"sum={total} expected={shape_size} (tolerance ±1)",
+                    }
+                )
 
         # Emit ground truth for reference
         if stats:
@@ -153,6 +183,7 @@ def _shutdown(app):
         for _ in range(10):
             await app.next_update_async()
         os._exit(0)
+
     asyncio.ensure_future(_do_shutdown())
 
 

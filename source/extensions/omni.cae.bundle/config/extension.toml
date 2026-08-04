@@ -9,7 +9,7 @@
 # its affiliates is strictly prohibited.
 
 [package]
-version = "2.1.1"
+version = "3.1.0"
 title = "CAE Extension Bundle"
 description = "Bundle of all CAE extensions, dependencies, and settings for Kit-CAE applications"
 category = "CAE"
@@ -33,29 +33,12 @@ icon = "data/icon.png"
 
 # Kit-CAE extensions
 "omni.cae.schema" = {order = -100}      # all USD schemas should be loaded with order = -100
-"omni.cae.data" = {}
-"omni.cae.file_format.cgns" = {}
-"omni.cae.delegate.cgns" = {}
-"omni.cae.delegate.ensight" = {}
-"omni.cae.delegate.hdf5" = {}
-"omni.cae.delegate.npz" = {}
-"omni.cae.delegate.nvdb" = {}
-"omni.cae.delegate.openfoam" = {}
-"omni.cae.delegate.trimesh" = {}
-"omni.cae.sids" = {}
-"omni.cae.importer.cgns" = {}
-"omni.cae.importer.npz" = {}
-"omni.cae.importer.ensight" = {}
-"omni.cae.importer.openfoam" = {}
+"omni.cae.usd_plugins" = { order = -100 } # all USD plugins should be loaded with order = -100
+"omni.cae.core" = {}
 
-# CAE Algorithms
-"omni.cae.algorithms.core" = {}
-"omni.cae.index" = {}
-"omni.cae.flow" = {}
-"omni.cae.algorithms.warp" = {}
-
-# CAE Viz (Algorithms 2.0)
+# CAE Viz
 "omni.cae.viz" = {}
+"omni.cae.usd_plugins_importers" = {}
 
 # UI
 "omni.cae.context_menu" = {}
@@ -90,10 +73,7 @@ rtx.index.overrideSubdivisionMode = "kd_tree"
 rtx.index.overrideSubdivisionPartCount = 1
 rtx.index.compositeEnabled = 1
 
-# This is necessary for usdrt-based algorithms in `omni.cae.algorithms.*`
-rtx.hydra.readTransformsFromFabricInRenderDelegate = true
-
-# FLOW specific settings: these are critical.
+# Flow specific settings: these are critical.
 exts."omni.flowusd".voxelize_velocity_vec4 = false
 exts."omni.flowusd".voxelize_velocity_float = true
 
@@ -119,10 +99,6 @@ pages = [
 
 [[test]]
 name = "startup"
-stdoutFailPatterns.exclude = [
-    # Warning coming from `omni.vdb_timesample_editor-0.2.0` with Kit version 108.0.0
-    "*SyntaxWarning*"
-]
 
 [[test]]
 timeout = 900
@@ -133,8 +109,4 @@ args = [
     "--/app/window/height=512",
     "--/app/window/dpiScaleOverride=1.0",
     "--/app/window/scaleToMonitor=false",
-]
-stdoutFailPatterns.exclude = [
-    # Warning coming from `omni.vdb_timesample_editor-0.2.0` with Kit version 108.0.0
-    "*SyntaxWarning*"
 ]

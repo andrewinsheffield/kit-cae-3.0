@@ -1,0 +1,32 @@
+name: derived_speed
+description: >
+  Human-review routing eval for authoring an Array Expression and consuming it
+  as a normal visualization field.
+graded: false
+kit_file: omni.cae.kit
+data_file: StaticMixer.cgns
+validator: null
+
+prompt: |
+  Import `data/StaticMixer.cgns`, inspect the owner prim and field layout, and
+  create a version-1 Array Expression named `speed` that computes the magnitude
+  of the native Velocity vector. Author the expression on the prim that owns
+  Velocity, confirm that `speed` appears in field discovery, and create a faces
+  visualization colored by `speed`.
+
+  Query the derived field range, set a useful color domain, and capture a clean
+  screenshot at `{render_dir}/eval_12_derived_speed.png`.
+
+  Print the expression owner path, expression text, derived range, and
+  RENDER_COMPLETE.
+
+expected_outputs:
+  - type: file
+    path: "{render_dir}/eval_12_derived_speed.png"
+    min_size_bytes: 10000
+    resolution: [1280, 720]
+
+scoring_notes: |
+  Verify correct expression ownership, `languageVersion = 1`, field discovery,
+  and binding by the expression instance name. Reject solutions that compute
+  and author a separate eager array outside the Array Expression API.

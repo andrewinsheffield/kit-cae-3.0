@@ -10,7 +10,7 @@
 
 [package]
 title = "Omni CAE Testing"
-version = "1.1.0"
+version = "1.2.0"
 description = "Testing utilities for Omni CAE"
 category = "Internal"
 changelog = "docs/CHANGELOG.md"
@@ -19,6 +19,7 @@ keywords = ["kit", "cae", "testing"]
 readme  = "docs/README.md"
 
 [dependencies]
+"omni.cae.core" = {}
 "omni.kit.commands" = {}
 "omni.kit.viewport.utility" = {}
 "omni.usd" = {}

@@ -12,7 +12,7 @@ function add_cae_usd_schemas(libs)
     -- Schemas are built via premake into the standard build output directory
     local schemaRoot = "%{root}/_build/%{platform}/%{config}/schemas"
     includedirs { schemaRoot.."/include" }
-    libdirs { schemaRoot.."/lib" }
+    libdirs { schemaRoot.."/usd/plugin" }
     for _, lib in ipairs(libs) do
         links { lib }
     end

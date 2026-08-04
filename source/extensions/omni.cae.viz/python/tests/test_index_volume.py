@@ -8,15 +8,21 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-import dav
 import numpy as np
 import omni.kit.test
-from omni.cae.data import cache
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+import warp_simdata as simdata
+from omni.cae.core import cache, usd_utils
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import get_test_data_path, new_stage, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from pxr import Usd, UsdShade, UsdVol
+
+from ._operator_test_utils import wait_for_operator_complete
+
+
+def _set_field_names(field_selection_api: cae_viz.FieldSelectionAPI, *names: str) -> None:
+    field_selection_api.CreateFieldNamesAttr().Set(list(names))
 
 
 class TestIndeXVolume(omni.kit.test.AsyncTestCase):
@@ -30,7 +36,7 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
 
     def get_cached_dataset(
         self, prim: Usd.Prim, timeCode: Usd.TimeCode = Usd.TimeCode.EarliestTime(), must_exist: bool = True
-    ) -> dav.Dataset:
+    ) -> simdata.Dataset:
         """
         Helper method to retrieve the dataset from cache for a given volume prim.
 
@@ -39,7 +45,7 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             timeCode: The time code to retrieve (defaults to EarliestTime)
 
         Returns:
-            The cached dav.Dataset
+            The cached simdata.Dataset
         """
         cache_key = f"[viz:index_volume]::{prim.GetPath()}"
         dataset = cache.get(cache_key, timeCode=timeCode)
@@ -48,6 +54,11 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
         else:
             self.assertIsNone(dataset, f"Dataset should not be in cache for key: {cache_key}")
         return dataset
+
+    def get_bracket(self, prim: Usd.Prim, raw_time: float) -> tuple[float, float]:
+        lower, upper, has_time_samples = usd_utils.get_bracketing_time_samples_for_prim(prim, raw_time)
+        self.assertTrue(has_time_samples, f"{prim.GetPath()} should have time samples")
+        return lower, upper
 
     def verify_cached_dataset(
         self,
@@ -75,7 +86,7 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             expected_field_names = expected_field_names + ["cae_mask"]
 
         # Verify dataset is valid
-        self.assertIsInstance(dataset, dav.Dataset, "Cached object should be a dav.Dataset")
+        self.assertIsInstance(dataset, simdata.Dataset, "Cached object should be a simdata.Dataset")
 
         # Verify field names
         field_names = dataset.get_field_names()
@@ -128,7 +139,7 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
         if volume_type == "vdb":
             # VDB volumes should have voxelized data
             # The data model might be different after voxelization
-            self.assertEqual(data_model, dav.data_models.vtk.image_data.DataModel)
+            self.assertEqual(data_model, simdata.data_models.vtk.image_data.DataModel)
         elif volume_type == "irregular":
             # Irregular volumes should preserve the original mesh structure
             # We can check for cells if it's an unstructured dataset
@@ -173,8 +184,10 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
         ds_prim = stage.GetPrimAtPath(dataset_path)
         self.assertIsNotNone(ds_prim, "Dataset prim should be valid")
 
-        await execute_command("CreateCaeVizVolume", dataset_path=dataset_path, prim_path=prim_path, type=volume_type)
-        await wait_for_update()
+        async with wait_for_operator_complete(prim_path, operator="IndeXVolume", allow_failure=True):
+            await execute_command(
+                "CreateCaeVizVolume", dataset_path=dataset_path, prim_path=prim_path, type=volume_type
+            )
 
         prim = stage.GetPrimAtPath(prim_path)
         self.assertIsNotNone(prim, "Volume prim should be valid")
@@ -309,7 +322,6 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             await import_to_stage(get_test_data_path("StaticMixer.cgns"), "/World/StaticMixer")
             base_path = "/World/StaticMixer/Base/StaticMixer"
             dataset_path = f"{base_path}/B1_P3"
-            pressure_field_path = f"{base_path}/Flow_Solution/Pressure"
             viz_path = "/World/CAE/Volume_Irregular"
 
             prim = await self.create_volume(stage, dataset_path, viz_path, volume_type="irregular")
@@ -329,8 +341,8 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
 
             # Set color field to Pressure; the operator doesn't really execute until the field is set.
             field_api = cae_viz.FieldSelectionAPI(prim, "colors")
-            field_api.CreateTargetRel().SetTargets([pressure_field_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                _set_field_names(field_api, "Pressure")
 
             # Verify extent attribute exists and has correct values
             volume = UsdVol.Volume(prim)
@@ -345,10 +357,8 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             np.testing.assert_allclose(extent[0], expected_min, atol=self.tolerance, err_msg="Extent min should match")
             np.testing.assert_allclose(extent[1], expected_max, atol=self.tolerance, err_msg="Extent max should match")
 
-            # Verify the field selection target is set
-            targets = field_api.GetTargetRel().GetTargets()
-            self.assertEqual(len(targets), 1, "Should have one field target")
-            self.assertEqual(str(targets[0]), pressure_field_path, "Field target should match Pressure path")
+            # Verify the field selection name is set
+            self.assertEqual(field_api.GetFieldNamesAttr().Get(), ["Pressure"], "Field name should match Pressure")
 
             # Verify importer setup using utility method
             self.verify_importer_setup(prim, "irregular")
@@ -373,7 +383,6 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             await import_to_stage(get_test_data_path("StaticMixer.cgns"), "/World/StaticMixer")
             base_path = "/World/StaticMixer/Base/StaticMixer"
             dataset_path = f"{base_path}/B1_P3"
-            temp_field_path = f"{base_path}/Flow_Solution/Temperature"
             viz_path = "/World/CAE/Volume_VDB"
 
             prim = await self.create_volume(stage, dataset_path, viz_path, volume_type="vdb")
@@ -398,8 +407,8 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
 
             # Set color field to Temperature; the operator doesn't really execute until the field is set.
             field_api = cae_viz.FieldSelectionAPI(prim, "colors")
-            field_api.CreateTargetRel().SetTargets([temp_field_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                _set_field_names(field_api, "Temperature")
 
             # Verify extent attribute exists and has correct values
             volume = UsdVol.Volume(prim)
@@ -414,10 +423,10 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             np.testing.assert_allclose(extent[0], expected_min, atol=self.tolerance, err_msg="Extent min should match")
             np.testing.assert_allclose(extent[1], expected_max, atol=self.tolerance, err_msg="Extent max should match")
 
-            # Verify the field selection target is set
-            targets = field_api.GetTargetRel().GetTargets()
-            self.assertEqual(len(targets), 1, "Should have one field target")
-            self.assertEqual(str(targets[0]), temp_field_path, "Field target should match Temperature path")
+            # Verify the field selection name is set
+            self.assertEqual(
+                field_api.GetFieldNamesAttr().Get(), ["Temperature"], "Field name should match Temperature"
+            )
 
             # Verify importer setup using utility method
             self.verify_importer_setup(prim, "vdb")
@@ -448,8 +457,8 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
 
             # Change maxResolution and verify sampling distance doesn't change
             voxel_api = cae_viz.DatasetVoxelizationAPI(prim, "source")
-            voxel_api.CreateMaxResolutionAttr().Set(256)  # Change resolution
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                voxel_api.CreateMaxResolutionAttr().Set(256)  # Change resolution
 
             blocked_sampling_distance = prim.GetCustomDataByKey("nvindex.renderSettings:samplingDistance")
             self.assertEqual(
@@ -460,8 +469,8 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             prim.SetCustomDataByKey("cae:viz:block_sampling_distance_update", False)
 
             # Change maxResolution again and verify sampling distance DOES change
-            voxel_api.GetMaxResolutionAttr().Set(32)  # Change to different resolution
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                voxel_api.GetMaxResolutionAttr().Set(32)  # Change to different resolution
 
             unblocked_sampling_distance = prim.GetCustomDataByKey("nvindex.renderSettings:samplingDistance")
             self.assertNotEqual(
@@ -482,8 +491,6 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             await import_to_stage(get_test_data_path("StaticMixer.cgns"), "/World/StaticMixer")
             base_path = "/World/StaticMixer/Base/StaticMixer"
             dataset_path = f"{base_path}/B1_P3"
-            temp_field_path = f"{base_path}/Flow_Solution/Temperature"
-            pressure_field_path = f"{base_path}/Flow_Solution/Pressure"
             viz_path = "/World/CAE/Volume_WithField"
 
             prim = await self.create_volume(stage, dataset_path, viz_path, volume_type="irregular")
@@ -494,14 +501,14 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
             # Create multiple field selection instances with different names
             # First field: "colors" -> Temperature
             field_api_colors = cae_viz.FieldSelectionAPI(prim, "colors")
-            field_api_colors.CreateTargetRel().SetTargets([temp_field_path])
 
             # Second field: "other_field" -> Pressure
             cae_viz.FieldSelectionAPI.Apply(prim, "other_field")
             field_api_other = cae_viz.FieldSelectionAPI(prim, "other_field")
-            field_api_other.CreateTargetRel().SetTargets([pressure_field_path])
 
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                _set_field_names(field_api_colors, "Temperature")
+                _set_field_names(field_api_other, "Pressure")
 
             # Verify extent attribute exists and has correct values (after fields are set)
             volume = UsdVol.Volume(prim)
@@ -539,12 +546,12 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
         async with new_stage() as stage:
             from omni.timeline import get_timeline_interface
 
+            stage.SetTimeCodesPerSecond(1.0)
+
             # Import temporal dataset
-            await import_to_stage(get_test_data_path("hex_timesteps.cgns"), "/World/hex_timesteps", time_scale=10.0)
+            await import_to_stage(get_test_data_path("hex_timesteps.cgns"), "/World/hex_timesteps", scale=10.0)
             base_path = "/World/hex_timesteps/Base/Zone"
             dataset_path = f"{base_path}/ElementsUniform"
-            field_path = f"{base_path}/SolutionVertex0001/PointSinusoid"
-            other_field_path = f"{base_path}/SolutionCellCenter0001/CellSinusoid"
             viz_path = "/World/CAE/Volume_Temporal"
 
             # Set up timeline
@@ -572,8 +579,8 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
 
             # Set color field to PointSinusoid; the operator doesn't really execute until the field is set.
             field_api = cae_viz.FieldSelectionAPI(prim, "colors")
-            field_api.CreateTargetRel().SetTargets([field_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                _set_field_names(field_api, "PointSinusoid")
 
             # Verify extent attribute exists and has correct values at time 0
             volume = UsdVol.Volume(prim)
@@ -601,16 +608,18 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
 
             # ===== Test temporal behavior at different time steps =====
 
-            # Move to time 10 and verify operator still works
-            timeline.set_current_time(10.0)
-            await wait_for_update()
+            # Move to a plugin-backed time sample and verify operator still works.
+            raw_time_1 = 10.0
+            time_1_lower, _ = self.get_bracket(prim, raw_time_1)
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                timeline.set_current_time(raw_time_1)
 
             # Verify prim is still valid
-            self.assertTrue(prim.IsValid(), "Volume should be valid at time 10")
+            self.assertTrue(prim.IsValid(), "Volume should be valid at the first temporal sample")
 
             # Verify extent is still valid (geometry doesn't change in this dataset)
             extent_t10 = extent_attr.Get()
-            self.assertEqual(len(extent_t10), 2, "Extent should have 2 elements at time 10")
+            self.assertEqual(len(extent_t10), 2, "Extent should have 2 elements at the first temporal sample")
             np.testing.assert_allclose(
                 extent_t10[0], extent_t0[0], atol=self.tolerance, err_msg="Extent min should be consistent"
             )
@@ -618,50 +627,53 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
                 extent_t10[1], extent_t0[1], atol=self.tolerance, err_msg="Extent max should be consistent"
             )
 
-            # Verify cached dataset at time 10 (field values may differ)
-            dataset_t10 = self.get_cached_dataset(prim, timeCode=Usd.TimeCode(10.0))
-            self.assertIsNotNone(dataset_t10, "Dataset should be cached at time 10")
-            self.assertEqual(dataset_t10.get_field_names(), ["colors"], "Should have colors field at time 10")
+            # Verify cached dataset at the snapped sample time (field values may differ)
+            dataset_t10 = self.get_cached_dataset(prim, timeCode=Usd.TimeCode(time_1_lower))
+            self.assertIsNotNone(dataset_t10, "Dataset should be cached at the first temporal sample")
+            self.assertEqual(dataset_t10.get_field_names(), ["colors"], "Should have colors field at first sample")
 
-            # Move to time 20 and verify operator still works
-            timeline.set_current_time(20.0)
-            await wait_for_update()
+            # Move to another plugin-backed time sample and verify operator still works.
+            raw_time_2 = 20.0
+            time_2_lower, _ = self.get_bracket(prim, raw_time_2)
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                timeline.set_current_time(raw_time_2)
 
             # Verify prim is still valid
-            self.assertTrue(prim.IsValid(), "Volume should be valid at time 20")
+            self.assertTrue(prim.IsValid(), "Volume should be valid at the second temporal sample")
 
-            # Verify cached dataset at time 20
-            dataset_t20 = self.get_cached_dataset(prim, timeCode=Usd.TimeCode(20.0))
-            self.assertIsNotNone(dataset_t20, "Dataset should be cached at time 20")
-            self.assertEqual(dataset_t20.get_field_names(), ["colors"], "Should have colors field at time 20")
+            # Verify cached dataset at the snapped sample time
+            dataset_t20 = self.get_cached_dataset(prim, timeCode=Usd.TimeCode(time_2_lower))
+            self.assertIsNotNone(dataset_t20, "Dataset should be cached at the second temporal sample")
+            self.assertEqual(dataset_t20.get_field_names(), ["colors"], "Should have colors field at second sample")
 
             # Verify compute task time parameters are updated
             loader_prim = prim.GetChild("Material").GetChild("DataLoader")
             loader = UsdShade.Shader(loader_prim)
             time_code_input = loader.GetInput("params_time_code")
             self.assertTrue(time_code_input, "Should have params_time_code input")
-            # The time code should reflect the current timeline position
-            self.assertIsNotNone(time_code_input.Get(), "params_time_code should be set at time 20")
+            # The time code should reflect the current snapped timeline position.
+            self.assertIsNotNone(time_code_input.Get(), "params_time_code should be set at the second temporal sample")
 
             # modify something (say coloring field) on the prim, and verify the cached dataset is invalidated
             field_api = cae_viz.FieldSelectionAPI(prim, "colors")
-            field_api.CreateTargetRel().SetTargets([other_field_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                _set_field_names(field_api, "CellSinusoid")
 
             # Verify cached dataset is invalidated
             self.get_cached_dataset(prim, timeCode=Usd.TimeCode(0.0), must_exist=False)
-            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(20.0), must_exist=True)
+            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(time_2_lower))
 
     async def test_volume_temporal_interpolation(self):
         """Test volume with temporal data and field interpolation enabled."""
         async with new_stage() as stage:
             from omni.timeline import get_timeline_interface
 
+            stage.SetTimeCodesPerSecond(1.0)
+
             # Import temporal dataset
-            await import_to_stage(get_test_data_path("hex_timesteps.cgns"), "/World/hex_timesteps", time_scale=10.0)
+            await import_to_stage(get_test_data_path("hex_timesteps.cgns"), "/World/hex_timesteps", scale=10.0)
             base_path = "/World/hex_timesteps/Base/Zone"
             dataset_path = f"{base_path}/ElementsUniform"
-            field_path = f"{base_path}/SolutionVertex0001/PointSinusoid"
             viz_path = "/World/CAE/Volume_Temporal_Interp"
 
             # Set up timeline
@@ -682,14 +694,14 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
 
             # Set color field to PointSinusoid
             field_api = cae_viz.FieldSelectionAPI(prim, "colors")
-            field_api.CreateTargetRel().SetTargets([field_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                _set_field_names(field_api, "PointSinusoid")
 
             # Enable temporal interpolation
-            cae_viz.OperatorTemporalAPI.Apply(prim)
-            temporal_api = cae_viz.OperatorTemporalAPI(prim)
-            temporal_api.CreateEnableFieldInterpolationAttr().Set(True)
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                cae_viz.OperatorTemporalAPI.Apply(prim)
+                temporal_api = cae_viz.OperatorTemporalAPI(prim)
+                temporal_api.CreateEnableFieldInterpolationAttr().Set(True)
 
             # Verify OperatorTemporalAPI is applied
             self.assertTrue(prim.HasAPI(cae_viz.OperatorTemporalAPI), "Should have OperatorTemporalAPI")
@@ -728,19 +740,22 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
                 timeCode=Usd.TimeCode(0.0),
             )
 
-            # since 0 doens't need next, we should not have a cached dataset for it
-            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(10.0), must_exist=False)
+            # Since exact time 0 does not need the next sample, only the current sample should be cached.
+            raw_mid_time = 1.0
+            lower_time, upper_time = self.get_bracket(prim, raw_mid_time)
+            self.assertNotEqual(lower_time, upper_time, "Interpolation test requires distinct bracketing samples")
+            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(upper_time), must_exist=False)
 
-            # Move to time 5 (between keyframes 0 and 10) to test interpolation
-            timeline.set_current_time(5.0)
-            await wait_for_update()
+            # Move between plugin-backed samples to test interpolation.
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                timeline.set_current_time(raw_mid_time)
 
             # Verify prim is still valid
-            self.assertTrue(prim.IsValid(), "Volume should be valid at time 5 (interpolated)")
+            self.assertTrue(prim.IsValid(), "Volume should be valid at interpolated time")
 
             # Verify compute task parameters include both current and next time codes
-            time_code_str = time_code_input.Get()
-            next_time_code_str = next_time_code_input.Get()
+            time_code_str = loader.GetInput("params_time_code").Get()
+            next_time_code_str = loader.GetInput("params_next_time_code").Get()
             self.assertIsNotNone(time_code_str, "params_time_code should be set at interpolated time")
             self.assertIsNotNone(next_time_code_str, "params_next_time_code should be set for interpolation")
             # next_time_code should not be "None" when interpolating
@@ -748,32 +763,33 @@ class TestIndeXVolume(omni.kit.test.AsyncTestCase):
                 str(next_time_code_str), "None", "params_next_time_code should not be None when interpolating"
             )
 
-            # Verify cached datasets exist for both bracketing time codes
-            # The operator should cache data at the bracketing times (0 and 10)
-            dataset_t0 = self.get_cached_dataset(prim, timeCode=Usd.TimeCode(0.0))
-            self.assertIsNotNone(dataset_t0, "Dataset should be cached at time 0 (bracket)")
+            # Verify cached datasets exist for both bracketing time codes.
+            dataset_t0 = self.get_cached_dataset(prim, timeCode=Usd.TimeCode(lower_time))
+            self.assertIsNotNone(dataset_t0, "Dataset should be cached at the lower bracket")
 
-            dataset_t10 = self.get_cached_dataset(prim, timeCode=Usd.TimeCode(10.0))
-            self.assertIsNotNone(dataset_t10, "Dataset should be cached at time 10 (bracket)")
+            dataset_t10 = self.get_cached_dataset(prim, timeCode=Usd.TimeCode(upper_time))
+            self.assertIsNotNone(dataset_t10, "Dataset should be cached at the upper bracket")
 
-            # Move to an exact keyframe (time 10)
-            timeline.set_current_time(10.0)
+            # Move to an exact keyframe.
+            timeline.set_current_time(upper_time)
             await wait_for_update()
 
             # At exact keyframe, next_time_code might be None or next keyframe
             time_code_str_t10 = time_code_input.Get()
             self.assertIsNotNone(time_code_str_t10, "params_time_code should be set at keyframe")
 
-            # Disable interpolation and verify behavior changes
-            temporal_api.GetEnableFieldInterpolationAttr().Set(False)
+            # Disable interpolation while parked at the raw midpoint. The toggle
+            # itself re-executes the operator; moving the raw timeline afterward
+            # may not emit another completion because the snapped timecode can
+            # remain on the same lower sample.
+            timeline.set_current_time(raw_mid_time)
             await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="IndeXVolume"):
+                temporal_api.GetEnableFieldInterpolationAttr().Set(False)
 
-            # Move to interpolated time again
-            timeline.set_current_time(15.0)
-            await wait_for_update()
-
-            # With interpolation disabled, the time should snap to nearest keyframe
+            # With interpolation disabled, the time should snap to the lower bracket.
             # The operator should still work but without interpolation
-            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(10.0), must_exist=True)
-            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(20.0), must_exist=False)
-            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(0.0), must_exist=False)
+            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(lower_time), must_exist=True)
+            self.get_cached_dataset(prim, timeCode=Usd.TimeCode(upper_time), must_exist=False)
+            if lower_time != 0.0:
+                self.get_cached_dataset(prim, timeCode=Usd.TimeCode(0.0), must_exist=False)

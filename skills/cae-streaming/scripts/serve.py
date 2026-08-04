@@ -14,7 +14,6 @@
 #     bash skills/cae-streaming/scripts/launch_streaming.sh
 
 import asyncio
-import importlib
 import json
 import os
 import string
@@ -22,14 +21,14 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Callable
 
 import carb
 import omni.kit.app
 
 # Generic Kit-CAE imports — small, safe to require at module load.
-from omni.cae.data.commands import execute_command
+from omni.cae.core.commands import execute_command
 from omni.cae.testing import frame_prims, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
 
 # `omniverse_api.py` lives next to this script.
@@ -65,18 +64,18 @@ DEFAULT_SCENES: dict = {
         "dataset_path": "/World/StaticMixer/Base/StaticMixer/StaticMixer_Default",
         "default_viz": "Faces",
         "default_viz_command": "CreateCaeVizFaces",
-        "color_field": "/World/StaticMixer/Base/StaticMixer/Flow_Solution/Temperature",
+        "color_field": "Temperature",
     },
     "disk_out_ref": {
         "path": "${KIT_CAE_DIR}/data/disk_out_ref.npz",
         "format": "npz",
-        "schema_type": "Point Cloud",
+        "schema": "Point Cloud",
         "prim_path": "/World/disk_out_ref_npz",
-        "dataset_path": "/World/disk_out_ref_npz/NumPyDataSet",
+        "dataset_path": "/World/disk_out_ref_npz",
         "default_viz": "Volume",
         "default_viz_command": "CreateCaeVizVolume",
         "default_viz_kwargs": {"type": "vdb"},
-        "color_field": "/World/disk_out_ref_npz/NumPyArrays/Temp",
+        "color_field": "Temp",
     },
 }
 
@@ -169,33 +168,6 @@ def _emit_scene_loaded(scene_id: str, result: dict) -> None:
     except Exception as err:
         LOG_WARN(f"[cae-streaming] could not dispatch scene_loaded_signal: {err}")
 
-# Lazy importer resolution — separate Kit extensions ship per format.
-_IMPORTER_MODULE = {
-    "cgns": "omni.cae.importer.cgns",
-    "vtk": "omni.cae.importer.vtk",
-    "npz": "omni.cae.importer.npz",
-    "ensight": "omni.cae.importer.ensight",
-}
-_importer_cache: dict[str, Callable[..., Any] | None] = {}
-
-
-def _resolve_importer(fmt: str) -> Callable[..., Any] | None:
-    if fmt in _importer_cache:
-        return _importer_cache[fmt]
-    module_name = _IMPORTER_MODULE.get(fmt)
-    if not module_name:
-        _importer_cache[fmt] = None
-        return None
-    try:
-        module = importlib.import_module(module_name)
-        fn = getattr(module, "import_to_stage", None)
-        _importer_cache[fmt] = fn
-        return fn
-    except ImportError as err:
-        LOG_WARN(f"[cae-streaming] {module_name} not available: {err}")
-        _importer_cache[fmt] = None
-        return None
-
 
 api = OmniverseAPI()
 
@@ -207,19 +179,20 @@ def _install_outbound_probe() -> None:
     try:
         import carb.eventdispatcher
         from carb.settings import get_settings as _get_settings
-        send_evt_name = _get_settings().get_as_string(
-            "exts/omni.kit.livestream.messaging/send_message_event"
-        )
+
+        send_evt_name = _get_settings().get_as_string("exts/omni.kit.livestream.messaging/send_message_event")
         if not send_evt_name:
             LOG_WARN("[cae-streaming] cannot install outbound probe: send_message_event setting empty")
             return
         ed = carb.eventdispatcher.get_eventdispatcher()
+
         def _on_outbound(e):
             try:
                 msg = e.payload.get("message")
                 LOG_INFO(f"[cae-streaming] outbound probe FIRED: {msg[:200] if msg else '(no message)'}")
             except Exception as err:
                 LOG_WARN(f"[cae-streaming] outbound probe formatting err: {err}")
+
         global _OUTBOUND_PROBE_SUB
         _OUTBOUND_PROBE_SUB = ed.observe_event(event_name=send_evt_name, on_event=_on_outbound)
         LOG_INFO(f"[cae-streaming] outbound probe installed on {send_evt_name!r}")
@@ -299,9 +272,7 @@ async def _load_scene_via_script(scene_id: str, entry: dict) -> dict:
         source = full_path.read_text(encoding="utf-8")
         code = compile(source, str(full_path), "exec")
     except (OSError, SyntaxError) as err:
-        LOG_ERROR(
-            f"[cae-streaming] script {full_path.name} failed to read/compile:\n{traceback.format_exc()}"
-        )
+        LOG_ERROR(f"[cae-streaming] script {full_path.name} failed to read/compile:\n{traceback.format_exc()}")
         return {"ok": False, "error": f"compile_error: {err}", "scene_id": scene_id}
 
     module = types.ModuleType(module_name)
@@ -310,9 +281,7 @@ async def _load_scene_via_script(scene_id: str, entry: dict) -> dict:
     try:
         exec(code, module.__dict__)
     except Exception as err:
-        LOG_ERROR(
-            f"[cae-streaming] script {full_path.name} failed at import:\n{traceback.format_exc()}"
-        )
+        LOG_ERROR(f"[cae-streaming] script {full_path.name} failed at import:\n{traceback.format_exc()}")
         return {"ok": False, "error": f"import_error: {err}", "scene_id": scene_id}
 
     load_fn = getattr(module, "load", None)
@@ -326,9 +295,7 @@ async def _load_scene_via_script(scene_id: str, entry: dict) -> dict:
     try:
         result = await load_fn(scene_id, entry)
     except Exception as err:
-        LOG_ERROR(
-            f"[cae-streaming] script {full_path.name} load() raised:\n{traceback.format_exc()}"
-        )
+        LOG_ERROR(f"[cae-streaming] script {full_path.name} load() raised:\n{traceback.format_exc()}")
         return {"ok": False, "error": str(err), "scene_id": scene_id}
 
     if not isinstance(result, dict):
@@ -340,11 +307,13 @@ async def _load_scene_via_script(scene_id: str, entry: dict) -> dict:
     if not result.get("ok"):
         return {**{"scene_id": scene_id}, **result}
 
-    _LOADED.update({
-        "scene_id": scene_id,
-        "prim_path": result.get("prim_path"),
-        "viz_prim_path": result.get("viz_prim_path"),
-    })
+    _LOADED.update(
+        {
+            "scene_id": scene_id,
+            "prim_path": result.get("prim_path"),
+            "viz_prim_path": result.get("viz_prim_path"),
+        }
+    )
     _emit_scene_loaded(scene_id, result)
     # Echo scene_id for caller convenience; let script-supplied keys override.
     return {**{"scene_id": scene_id}, **result}
@@ -376,26 +345,17 @@ async def load_scene(scene_id: str = "", **_kwargs) -> dict:
         if entry.get("script"):
             return await _load_scene_via_script(scene_id, entry)
 
-        fmt = entry.get("format", "")
-        importer = _resolve_importer(fmt)
-        if importer is None:
-            return {
-                "ok": False,
-                "error": f"format {fmt!r} not available in this Kit app (try omni.cae_vtk.kit for VTK)",
-                "scene_id": scene_id,
-            }
-
         prim_path = entry["prim_path"]
-        import_kwargs = {}
-        if fmt == "npz" and "schema_type" in entry:
-            import_kwargs["schema_type"] = entry["schema_type"]
+        import_kwargs = dict(entry.get("import_args", {}))
+        if "schema" in entry:
+            import_kwargs["schema"] = entry["schema"]
 
         # Replace any previous load before importing.
         _clear_previous_load()
         await wait_for_update()
 
         LOG_INFO(f"[cae-streaming] importing {scene_id} from {entry['path']}")
-        await importer(entry["path"], prim_path, **import_kwargs)
+        await import_to_stage(entry["path"], prim_path, **import_kwargs)
         await wait_for_update()
         _log_imported_prims(prim_path)
 
@@ -438,11 +398,13 @@ async def load_scene(scene_id: str = "", **_kwargs) -> dict:
             await _frame_camera([viz_prim_path], zoom=0.05, timeout=15.0)
 
         # Track this load so the next call can clean it up.
-        _LOADED.update({
-            "scene_id": scene_id,
-            "prim_path": prim_path,
-            "viz_prim_path": viz_prim_path or None,
-        })
+        _LOADED.update(
+            {
+                "scene_id": scene_id,
+                "prim_path": prim_path,
+                "viz_prim_path": viz_prim_path or None,
+            }
+        )
 
         result = {
             "ok": True,
@@ -479,7 +441,7 @@ def register_scene(scene_id: str = "", entry: dict | None = None, **_kwargs) -> 
 
     Required entry keys: `path`, `format`, `prim_path`, `dataset_path`,
     `default_viz_command`. Optional: `label`, `description`, `default_viz`,
-    `default_viz_kwargs`, `color_field`, `schema_type`.
+    `default_viz_kwargs`, `color_field`, `schema`, `import_args`.
     """
     if not scene_id:
         return {"ok": False, "error": "scene_id required"}
@@ -548,13 +510,9 @@ def _log_imported_prims(prim_path: str, max_depth: int = 6) -> None:
 
 
 def _discover_dataset_path(prim_path: str, configured: str | None = None) -> str | None:
-    """Resolve a CAE dataset prim under `prim_path`. Tries the configured path
-    first, then walks the subtree looking for a prim with any cae:* attribute
-    (the importer applies CAE schemas with that namespace). Returns the first
-    valid path or None if nothing matches.
-    """
+    """Resolve the first OmniSciDataset under ``prim_path``."""
     try:
-        from pxr import Usd
+        from pxr import OmniSci, Usd
     except Exception:
         return configured
     stage = get_context().get_stage()
@@ -568,14 +526,10 @@ def _discover_dataset_path(prim_path: str, configured: str | None = None) -> str
     root = stage.GetPrimAtPath(prim_path)
     if not root or not root.IsValid():
         return None
-    # First pass: any prim with a cae:* property — these are CAE datasets/fields.
     for prim in Usd.PrimRange(root):
-        if prim.GetPath() == root.GetPath():
-            continue
-        for attr in prim.GetPropertyNames():
-            if attr.startswith("cae:") or "cae:" in attr.lower():
-                LOG_INFO(f"[cae-streaming] discovered dataset prim: {prim.GetPath()}")
-                return str(prim.GetPath())
+        if prim.IsA(OmniSci.Dataset):
+            LOG_INFO(f"[cae-streaming] discovered dataset prim: {prim.GetPath()}")
+            return str(prim.GetPath())
     return None
 
 
@@ -585,6 +539,7 @@ async def _frame_camera(prim_paths: list[str], zoom: float = 0.05, timeout: floa
     success."""
     try:
         from omni.cae.testing import frame_prims as _frame_prims
+
         await asyncio.wait_for(_frame_prims(prim_paths, zoom=zoom), timeout=timeout)
         return True
     except asyncio.TimeoutError:
@@ -595,10 +550,8 @@ async def _frame_camera(prim_paths: list[str], zoom: float = 0.05, timeout: floa
         return False
 
 
-def _bind_color_field(viz_prim_path: str, field_path: str) -> bool:
-    """Bind `field_path` as the `colors` target on a CAE viz prim. Returns True
-    on success. Mirrors the pattern from cae-visualization/SKILL.md and
-    example_faces.py."""
+def _bind_color_field(viz_prim_path: str, field_name: str) -> bool:
+    """Bind an OmniSci field instance as the viz prim's color input."""
     try:
         from omni.cae.schema import viz as cae_viz
     except ImportError as err:
@@ -611,8 +564,8 @@ def _bind_color_field(viz_prim_path: str, field_path: str) -> bool:
     if not viz_prim or not viz_prim.IsValid():
         LOG_WARN(f"[cae-streaming] viz prim {viz_prim_path} not valid; cannot bind color")
         return False
-    cae_viz.FieldSelectionAPI(viz_prim, "colors").CreateTargetRel().SetTargets([field_path])
-    LOG_INFO(f"[cae-streaming] bound colors → {field_path} on {viz_prim_path}")
+    cae_viz.FieldSelectionAPI(viz_prim, "colors").CreateFieldNamesAttr().Set([field_name])
+    LOG_INFO(f"[cae-streaming] bound colors to {field_name} on {viz_prim_path}")
     return True
 
 

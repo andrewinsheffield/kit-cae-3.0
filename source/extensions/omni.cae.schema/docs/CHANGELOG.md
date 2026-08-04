@@ -2,6 +2,54 @@
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [2.5.0]
+
+- Added the experimental `CaeVizIndeXAxisymmetricVolumeAPI` schema for direct
+  native-coordinate NVIDIA IndeX rendering of axisymmetric volumes, with a ray
+  sampling control that defaults to the finest native cell spacing.
+- Removed the obsolete `textureResolution` property from `CaeVizPlanarSliceAPI`.
+  The direction modes remain available and now drive geometry extraction rather
+  than texture-based slicing.
+
+## [2.4.0]
+
+- Added the experimental multiple-apply `CaeArrayExpressionAPI` schema for
+  versioned, named, lazily evaluated scientific arrays on any array-owning prim,
+  including enabled state, display name, and compute-device selection.
+- Added `CaeVizDatasetAxisymmetricRepresentationAPI`, a multiple-apply schema for
+  configuring angular cells and a degree-based angular range on a selected dataset input.
+- Set the default axisymmetric representation to 32 angular cells.
+
+## [2.3.0]
+
+- Added `CaeVizDatasetDualAPI`, a multiple-apply API schema that requests a dual representation for
+  the corresponding selected dataset instance.
+
+## [2.2.0]
+
+- Added `CaeVizDatasetVoronoiPointCloudAPI`, a multiple-apply API schema that marks a selected
+  dataset instance for conversion to an implicit Voronoi point-cloud model.
+- Added `CaeVizIsoSurfaceAPI`, a single-apply API schema for `UsdGeomMesh` operators with an
+  `isoValue` attribute controlling triangular iso-surface extraction.
+
+## [2.1.0]
+
+- Reworked extension startup to register this extension's bundled USD plugin schemas from its
+  `usd/plugin` root. Generated schema modules are imported through the shared `pxr` namespace package.
+- Removed the runtime dependency on `omni.cae.usd_plugins`; schemas supplied by that packaged
+  extension, such as `OmniSciReservoir`, should be imported directly from `pxr` after enabling
+  their provider extension.
+- Added a templated `pxr_init.py` (used during schema codegen) so each generated namespace becomes a
+  proper `pxr` sub-package without ad-hoc patching.
+- Added a `CaeVizColormap` annotation attribute used by viz operators to look up their preferred colormap.
+
+## [2.0.0]
+
+- Removed the dependency on the obsolete legacy algorithms schema extension. `omni.cae.schema` now loads only the
+  current shared and format schemas packaged in this extension.
+- Updated schema packaging to keep native libraries directly under `usd/plugin` and generated Python bindings under
+  `lib/python`, matching the standalone CAE USD plugin package layout.
+
 ## [1.6.0]
 
 - Added `CaeVizDatasetSubsetAPI` multi-apply API schema. Restricts an operator's input dataset to cells

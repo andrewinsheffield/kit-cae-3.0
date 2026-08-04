@@ -28,8 +28,6 @@ namespace cae
 namespace index
 {
 
-using omni::cae::data::IFieldArray;
-
 class PythonImporter::Impl
 {
     bool m_populated = false;

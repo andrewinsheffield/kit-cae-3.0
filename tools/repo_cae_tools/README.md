@@ -27,7 +27,7 @@ Manages Kit SDK version selection and generates files from templates based on th
 ./repo.sh select_kit_version
 
 # Select specific version (generates files)
-./repo.sh select_kit_version --version 108.0.0
+./repo.sh select_kit_version --version 109.0.1
 
 # Use default version (generates files)
 ./repo.sh select_kit_version --default
@@ -48,7 +48,7 @@ Manages Kit SDK version selection and generates files from templates based on th
 ./repo.sh select_kit_version --dry-run
 
 # Preview what selecting a version would do
-./repo.sh select_kit_version --version 108.0.0 --dry-run
+./repo.sh select_kit_version --version 109.0.1 --dry-run
 
 # Preview what auto mode would do
 ./repo.sh select_kit_version --auto --dry-run
@@ -109,9 +109,9 @@ The `kit-versions.json` file defines available Kit versions and their associated
     ]
   },
   "versions": {
-    "108.0.0": {
+    "109.0.1": {
       "variables": {
-        "KIT_VERSION_TAG": "108.0.0+release.123456.abcdef",
+        "KIT_VERSION_TAG": "109.0.1+release.123456.abcdef",
         "INDEX_HEADERS_TAG": "387500.2199"
       },
       "templates": [
@@ -122,7 +122,7 @@ The `kit-versions.json` file defines available Kit versions and their associated
       ]
     }
   },
-  "default": "108.0.0"
+  "default": "109.0.1"
 }
 ```
 

@@ -14,28 +14,28 @@ prompt: |
   Your task has three parts — each must be done from scratch in this session:
 
   1. **Invent a brand-new custom data format** — design a new binary file format
-     that Kit-CAE doesn't natively support. Follow the Format Onboarding process
-     in `docs/FormatOnboarding.md` (schema → delegate → importer → API schema).
-     Use `docs/format_tutorial_reference/` as a *structural reference* to see
-     how format onboarding works (schema, delegate, importer, autorun script).
-     Do NOT copy the SCAE format itself — study how it's built, then design
-     your own format from scratch with its own structure and conventions.
+     that Kit-CAE doesn't natively support. Follow the current two-repository
+     process in `docs/FormatOnboarding.md`: implement and package the native
+     OpenUSD file-format plugin in `cae-openusd-plugins`, then register its typed
+     importer in Kit-CAE. Design the format from scratch with its own structure
+     and conventions.
      Your format should have a *functional advantage* for the type of data
      you're generating — e.g., if your data is a structured grid, design
      a format that represents structured grids efficiently rather than
      shoehorning into a generic point cloud layout.
      Requirements:
      - New file extension, header/manifest structure, and naming conventions
-     - Do NOT reuse `.scae` (the tutorial format), `.nxf`, `.nvol`, or any
+     - Do NOT reuse `.nxf`, `.nvol`, or any
        format you have seen or created in prior sessions. The format must be
        original to this session.
      - The format must support time-varying data (multiple timestep files or
        a multi-frame container)
-     - Follow the SCAE tutorial pattern for delegate and importer structure:
-       inherit from `DataDelegateBase` and `AbstractImporterDelegate`
-     - Choose the correct API schema for your data topology:
-       `CaePointCloudAPI` (points only), `CaeSidsUnstructuredAPI` (mesh),
-       or `CaeDenseVolumeAPI` (structured grid)
+     - Author an `OmniSciDataset` with `OmniSciArrayAPI` and `OmniSciFieldAPI`
+       instances, using lazy array values and topology APIs appropriate to the
+       data.
+     - Add a multiple-apply `OmniSciFileFormatArgs<Format>API`, register it in
+       the importer dispatcher, and verify the packaged plugin artifact in
+       Kit-CAE.
 
   2. **Generate physically or mathematically meaningful data** — write a data
      generator (running inside Kit via `--exec`) that algorithmically produces
@@ -98,9 +98,12 @@ prompt: |
 
   Save the final video to `{render_dir}/eval_08_creativity.mp4`.
 
-  **All artifacts** (generated data files, rendered frames, videos) must be
-  written under `skills/evals/results/`. Do not write generated data to `data/`
-  or scripts to `scripts/` — keep the rest of the repo clean.
+  **All generated runtime artifacts** (data files, rendered frames, videos, and
+  one-off driver scripts) must be written under `skills/evals/results/`. Source
+  changes for the file-format plugin belong in the sibling
+  `cae-openusd-plugins` checkout and importer registration belongs in Kit-CAE,
+  as described by the onboarding guide. Do not write generated data to `data/`
+  or scripts to `scripts/`.
 
   **Summary requirement:** After completing eval 08, add an `eval_08_creativity`
   section to your `summary.json` file (`skills/evals/results/<harness>/<model>/summary.json`)
@@ -121,7 +124,7 @@ scoring_notes: |
 
   Format (weight: 20%)
   - Is the format genuinely new? (NOT .scae, .nxf, .nvol, or any prior format)
-  - Does it have a proper schema, delegate, and importer?
+  - Does it have a proper arguments schema, native file-format plugin, and importer?
   - Does it support time-varying data?
   - Does the data format provide some functional advantage for the type of data generated?
 

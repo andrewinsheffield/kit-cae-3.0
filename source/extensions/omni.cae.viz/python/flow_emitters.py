@@ -11,12 +11,12 @@
 from logging import getLogger
 from typing import Any
 
-import dav
 import numpy as np
 import warp as wp
-from omni.cae.data import array_utils, progress, usd_utils
-from omni.cae.dav import index_utils as dav_index_utils
+import warp_simdata as simdata
+from omni.cae.core import array_utils, progress, usd_utils
 from omni.cae.schema import viz as cae_viz
+from omni.cae.simdata import index_utils as simdata_index_utils
 from omni.usd import get_context
 from pxr import Gf, Sdf, Usd, UsdShade, UsdVol, Vt
 
@@ -42,7 +42,7 @@ class FlowNanoVDBEmitter:
         "CaeVizFieldThresholdingAPI:temperatures",
     }
 
-    async def get_source(self, prim: Usd.Prim, timeCode: Usd.TimeCode, device: str) -> dav.Dataset:
+    async def get_source(self, prim: Usd.Prim, timeCode: Usd.TimeCode, device: str) -> simdata.Dataset:
         return await viz_utils.get_input_dataset(prim, "source", timeCode=timeCode, device=device)
 
     async def exec(self, prim: Usd.Prim, device: str, context: ExecutionContext):
@@ -58,7 +58,7 @@ class FlowNanoVDBEmitter:
                 volume: wp.Volume = field.get_data()
                 assert volume is not None, f"{field_name} field is required."
                 assert isinstance(volume, wp.Volume), f"{field_name} field must be a wp.Volume."
-                vdb_dataset = array_utils.get_nanovdb_as_field_array(volume).to_device(-1).numpy().view(dtype=np.uint32)
+                vdb_dataset = array_utils.get_nanovdb_array(volume).numpy().view(dtype=np.uint32)
                 with viz_utils.edit_context(prim):
                     prim.CreateAttribute(vdb_attribute_name, Sdf.ValueTypeNames.UIntArray, custom=True).Set(
                         Vt.UIntArray.FromNumpy(vdb_dataset)
@@ -79,9 +79,9 @@ class FlowNanoVDBEmitter:
         # of the volume in 1 seconds using the max velocity magnitude.
         if "velocities" in field_map:
             velocity_field = source_dataset.get_field("velocities")
-            with progress.ProgressContext("Executing DAV [compute velocity range]"):
+            with progress.ProgressContext("Executing SimData [compute velocity range]"):
                 velocity_max = velocity_field.get_range()[1]
-            with progress.ProgressContext("Executing DAV [compute bounds]"):
+            with progress.ProgressContext("Executing SimData [compute bounds]"):
                 bds_min, bds_max = source_dataset.get_bounds()
             distance = np.linalg.norm(bds_max - bds_min)
             velocity_scale = float(distance / (velocity_max * 1.0))

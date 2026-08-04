@@ -17,13 +17,19 @@ CAE scenes already use ``Colormap`` prims as the canonical description of a
 scientific color ramp. IndeX volume rendering can consume those prims directly,
 while MDL shaders typically expect a texture asset for the ``lut`` input. This
 module bridges that gap by turning every ``Colormap`` prim on the active stage
-into a dynamic texture automatically.
+into color and opacity dynamic textures automatically.
 
 Only prims with ``CaeVizColormapTextureAPI`` applied are managed. The API
 carries a ``cae:viz:colormapTexture:identifier`` attribute — a unique string
 set once at prim creation — that the manager uses to name the texture:
 
 ``dynamic://cae_colormap_<identifier>``
+
+The color texture contains the sampled RGBA ramp. A second texture exposes the
+same ramp's alpha channel as opaque grayscale so an MDL shader can sample it as
+an independent opacity lookup table:
+
+``dynamic://cae_opacitymap_<identifier>``
 
 Because the URL is derived from the identifier rather than the prim path, it
 remains stable if the prim is relocated via reference/payload composition.
@@ -39,7 +45,8 @@ It subscribes to stage attach/detach events and listens for USD object changes
 on the active stage. Whenever the stage becomes dirty, it rescans all
 ``Colormap`` prims via the usdrt Fabric stage, samples their
 ``rgbaPoints``/``xPoints`` into a 1D LUT, and uploads the result to an
-``omni.ui.DynamicTextureProvider``.
+``omni.ui.DynamicTextureProvider``. It also publishes an opaque grayscale LUT
+whose RGB channels contain the sampled alpha values.
 
 The manager intentionally has a narrow contract:
 
@@ -47,8 +54,8 @@ The manager intentionally has a narrow contract:
 - LUT contents are generated only from ``rgbaPoints`` and ``xPoints``.
 - Domain and boundary-mode semantics are left to the consuming shader/system.
 
-This keeps the service reusable for any renderer or shader path that wants a
-normalized color ramp texture.
+This keeps the service reusable for any renderer or shader path that wants
+normalized color and opacity ramp textures.
 """
 
 from __future__ import annotations
@@ -56,6 +63,8 @@ from __future__ import annotations
 __all__ = [
     "ColormapTextureManager",
     "build_colormap_lut",
+    "build_opacity_lut",
+    "get_dynamic_opacity_url_for_identifier",
     "get_dynamic_url_for_identifier",
 ]
 
@@ -77,6 +86,11 @@ logger = getLogger(__name__)
 def get_dynamic_url_for_identifier(identifier: str) -> str:
     """Return the ``dynamic://`` URL for a Colormap prim with the given ``CaeVizColormapTextureAPI`` identifier."""
     return f"dynamic://cae_colormap_{identifier}"
+
+
+def get_dynamic_opacity_url_for_identifier(identifier: str) -> str:
+    """Return the grayscale opacity-LUT URL derived from a Colormap's alpha channel."""
+    return f"dynamic://cae_opacitymap_{identifier}"
 
 
 def _normalize_colormap_points(rgba_points, x_points) -> tuple[np.ndarray, np.ndarray]:
@@ -117,12 +131,24 @@ def build_colormap_lut(rgba_points, x_points, resolution: int) -> np.ndarray:
     return np.ascontiguousarray(np.clip(out, 0.0, 1.0))
 
 
+def build_opacity_lut(color_lut: np.ndarray) -> np.ndarray:
+    """Convert an RGBA color LUT into an opaque grayscale LUT from its alpha channel."""
+    color_lut = np.asarray(color_lut, dtype=np.float32)
+    if color_lut.ndim != 2 or color_lut.shape[1] != 4:
+        raise ValueError(f"Expected an Nx4 RGBA LUT, got shape {color_lut.shape}")
+    opacity = color_lut[:, 3:4]
+    return np.concatenate([np.repeat(opacity, 3, axis=1), np.ones_like(opacity)], axis=1)
+
+
 @dataclass
 class _ColormapTextureEntry:
     prim_path: str
     texture_name: str
     dynamic_url: str
     provider: ui.DynamicTextureProvider
+    opacity_texture_name: str
+    opacity_dynamic_url: str
+    opacity_provider: ui.DynamicTextureProvider
     fingerprint: str | None = None
 
 
@@ -233,6 +259,14 @@ class ColormapTextureManager:
             raise KeyError(f"No colormap texture entry for {path!r} — is CaeVizColormapTextureAPI applied?")
         return entry.dynamic_url
 
+    def get_dynamic_opacity_url(self, prim_or_path: Usd.Prim | str | Sdf.Path) -> str:
+        """Return the grayscale opacity texture URL for the given Colormap."""
+        path = self._get_path_string(prim_or_path)
+        entry = self._entries.get(path)
+        if entry is None:
+            raise KeyError(f"No colormap texture entry for {path!r} — is CaeVizColormapTextureAPI applied?")
+        return entry.opacity_dynamic_url
+
     def get_entry(self, prim_or_path: Usd.Prim | str | Sdf.Path) -> _ColormapTextureEntry | None:
         """Return the internal texture entry for the given Colormap prim or path, or ``None`` if not tracked."""
         path = self._get_path_string(prim_or_path)
@@ -283,12 +317,22 @@ class ColormapTextureManager:
             identifier = cae_viz.ColormapTextureAPI(prim).GetIdentifierAttr().Get()
             texture_name = f"cae_colormap_{identifier}"
             dynamic_url = f"dynamic://{texture_name}"
-            logger.info("Registering colormap texture: %s -> %s", path, texture_name)
+            opacity_texture_name = f"cae_opacitymap_{identifier}"
+            opacity_dynamic_url = f"dynamic://{opacity_texture_name}"
+            logger.info(
+                "Registering colormap textures: %s -> color=%s opacity=%s",
+                path,
+                texture_name,
+                opacity_texture_name,
+            )
             entry = _ColormapTextureEntry(
                 prim_path=path,
                 texture_name=texture_name,
                 dynamic_url=dynamic_url,
                 provider=ui.DynamicTextureProvider(texture_name),
+                opacity_texture_name=opacity_texture_name,
+                opacity_dynamic_url=opacity_dynamic_url,
+                opacity_provider=ui.DynamicTextureProvider(opacity_texture_name),
             )
             self._entries[path] = entry
 
@@ -303,8 +347,13 @@ class ColormapTextureManager:
 
         tex_data = np.ascontiguousarray((lut.reshape(1, self._resolution, 4) * 255.0).round().astype(np.uint8))
         entry.provider.set_data_array(tex_data, [self._resolution, 1])
+        opacity_lut = build_opacity_lut(lut)
+        opacity_tex_data = np.ascontiguousarray(
+            (opacity_lut.reshape(1, self._resolution, 4) * 255.0).round().astype(np.uint8)
+        )
+        entry.opacity_provider.set_data_array(opacity_tex_data, [self._resolution, 1])
         entry.fingerprint = fingerprint
-        logger.info("Published LUT for %s", path)
+        logger.info("Published color and opacity LUTs for %s", path)
 
     def _is_relevant_colormap_path(self, path: Sdf.Path) -> bool:
         """Return True if ``path`` refers to a Colormap prim or one of its tracked point/identifier attributes."""

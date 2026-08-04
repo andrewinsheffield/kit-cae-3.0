@@ -17,6 +17,7 @@ usd_python_root = "${root}/_build/target-deps/python"
 generate_plugin_buildfiles = true
 plugin_buildfile_format = "premake"
 generate_root_buildfile = false
+lib_prefix = ""
 
 [repo_usd.plugin.omniCae]
 plugin_dir = "${root}/source/schemas/shared/omniCae"
@@ -25,10 +26,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCae"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCae"
 include_dir = "include/omniCae"
-resources_dir = "usd/plugin/OmniCae/resources"
-module_dir = "usd/python/pxr/OmniCae"
-lib_dir = "usd/plugin/OmniCae"
-bin_dir = "usd/plugin/OmniCae"
+resources_dir = "usd/plugin/omniCae/resources"
+module_dir = "lib/python/pxr/OmniCae"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -48,10 +49,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeSids"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeSids"
 include_dir = "include/omniCaeSids"
-resources_dir = "usd/plugin/OmniCaeSids/resources"
-module_dir = "usd/python/pxr/OmniCaeSids"
-lib_dir = "usd/plugin/OmniCaeSids"
-bin_dir = "usd/plugin/OmniCaeSids"
+resources_dir = "usd/plugin/omniCaeSids/resources"
+module_dir = "lib/python/pxr/OmniCaeSids"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -71,10 +72,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeVtk"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeVtk"
 include_dir = "include/omniCaeVtk"
-resources_dir = "usd/plugin/OmniCaeVtk/resources"
-module_dir = "usd/python/pxr/OmniCaeVtk"
-lib_dir = "usd/plugin/OmniCaeVtk"
-bin_dir = "usd/plugin/OmniCaeVtk"
+resources_dir = "usd/plugin/omniCaeVtk/resources"
+module_dir = "lib/python/pxr/OmniCaeVtk"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -85,7 +86,7 @@ usd_lib_dependencies = [
 ]
 
 additional_library_dirs = [
-    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin/OmniCae"
+    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin"
 ]
 additional_include_dirs = [
     "${root}/_build/generated/schemas"
@@ -104,10 +105,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeEnSight"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeEnSight"
 include_dir = "include/omniCaeEnSight"
-resources_dir = "usd/plugin/OmniCaeEnSight/resources"
-module_dir = "usd/python/pxr/OmniCaeEnSight"
-lib_dir = "usd/plugin/OmniCaeEnSight"
-bin_dir = "usd/plugin/OmniCaeEnSight"
+resources_dir = "usd/plugin/omniCaeEnSight/resources"
+module_dir = "lib/python/pxr/OmniCaeEnSight"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -118,7 +119,7 @@ usd_lib_dependencies = [
 ]
 
 additional_library_dirs = [
-    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin/OmniCae"
+    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin"
 ]
 additional_include_dirs = [
     "${root}/_build/generated/schemas"
@@ -137,10 +138,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeViz"
 plugin_dir = "${root}/source/schemas/shared/omniCaeViz"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 include_dir = "include/omniCaeViz"
-resources_dir = "usd/plugin/OmniCaeViz/resources"
-module_dir = "usd/python/pxr/OmniCaeViz"
-lib_dir = "usd/plugin/OmniCaeViz"
-bin_dir = "usd/plugin/OmniCaeViz"
+resources_dir = "usd/plugin/omniCaeViz/resources"
+module_dir = "lib/python/pxr/OmniCaeViz"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -162,10 +163,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeOpenFoam"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeOpenFoam"
 include_dir = "include/omniCaeOpenFoam"
-resources_dir = "usd/plugin/OmniCaeOpenFoam/resources"
-module_dir = "usd/python/pxr/OmniCaeOpenFoam"
-lib_dir = "usd/plugin/OmniCaeOpenFoam"
-bin_dir = "usd/plugin/OmniCaeOpenFoam"
+resources_dir = "usd/plugin/omniCaeOpenFoam/resources"
+module_dir = "lib/python/pxr/OmniCaeOpenFoam"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -175,7 +176,7 @@ usd_lib_dependencies = [
     "python"
 ]
 additional_library_dirs = [
-    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin/OmniCae"
+    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin"
 ]
 additional_include_dirs = [
     "${root}/_build/generated/schemas"
@@ -194,10 +195,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeNumPy"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeNumPy"
 include_dir = "include/omniCaeNumPy"
-resources_dir = "usd/plugin/OmniCaeNumPy/resources"
-module_dir = "usd/python/pxr/OmniCaeNumPy"
-lib_dir = "usd/plugin/OmniCaeNumPy"
-bin_dir = "usd/plugin/OmniCaeNumPy"
+resources_dir = "usd/plugin/omniCaeNumPy/resources"
+module_dir = "lib/python/pxr/OmniCaeNumPy"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -207,7 +208,7 @@ usd_lib_dependencies = [
     "python"
 ]
 additional_library_dirs = [
-    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin/OmniCae"
+    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin"
 ]
 additional_include_dirs = [
     "${root}/_build/generated/schemas"
@@ -226,10 +227,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeNvdb"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeNvdb"
 include_dir = "include/omniCaeNvdb"
-resources_dir = "usd/plugin/OmniCaeNvdb/resources"
-module_dir = "usd/python/pxr/OmniCaeNvdb"
-lib_dir = "usd/plugin/OmniCaeNvdb"
-bin_dir = "usd/plugin/OmniCaeNvdb"
+resources_dir = "usd/plugin/omniCaeNvdb/resources"
+module_dir = "lib/python/pxr/OmniCaeNvdb"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -239,7 +240,7 @@ usd_lib_dependencies = [
     "python"
 ]
 additional_library_dirs = [
-    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin/OmniCae"
+    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin"
 ]
 additional_include_dirs = [
     "${root}/_build/generated/schemas"
@@ -258,10 +259,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeHdf5"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeHdf5"
 include_dir = "include/omniCaeHdf5"
-resources_dir = "usd/plugin/OmniCaeHdf5/resources"
-module_dir = "usd/python/pxr/OmniCaeHdf5"
-lib_dir = "usd/plugin/OmniCaeHdf5"
-bin_dir = "usd/plugin/OmniCaeHdf5"
+resources_dir = "usd/plugin/omniCaeHdf5/resources"
+module_dir = "lib/python/pxr/OmniCaeHdf5"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -271,7 +272,7 @@ usd_lib_dependencies = [
     "python"
 ]
 additional_library_dirs = [
-    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin/OmniCae"
+    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin"
 ]
 additional_include_dirs = [
     "${root}/_build/generated/schemas"
@@ -290,10 +291,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeTrimesh"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeTrimesh"
 include_dir = "include/omniCaeTrimesh"
-resources_dir = "usd/plugin/OmniCaeTrimesh/resources"
-module_dir = "usd/python/pxr/OmniCaeTrimesh"
-lib_dir = "usd/plugin/OmniCaeTrimesh"
-bin_dir = "usd/plugin/OmniCaeTrimesh"
+resources_dir = "usd/plugin/omniCaeTrimesh/resources"
+module_dir = "lib/python/pxr/OmniCaeTrimesh"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -303,7 +304,7 @@ usd_lib_dependencies = [
     "python"
 ]
 additional_library_dirs = [
-    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin/OmniCae"
+    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin"
 ]
 additional_include_dirs = [
     "${root}/_build/generated/schemas"
@@ -322,10 +323,10 @@ generate_dir = "${root}/_build/generated/schemas/omniCaeCgns"
 install_root = "${root}/_build/%{platform}/%{config}/schemas"
 library_prefix = "OmniCaeCgns"
 include_dir = "include/omniCaeCgns"
-resources_dir = "usd/plugin/OmniCaeCgns/resources"
-module_dir = "usd/python/pxr/OmniCaeCgns"
-lib_dir = "usd/plugin/OmniCaeCgns"
-bin_dir = "usd/plugin/OmniCaeCgns"
+resources_dir = "usd/plugin/omniCaeCgns/resources"
+module_dir = "lib/python/pxr/OmniCaeCgns"
+lib_dir = "usd/plugin"
+bin_dir = "usd/plugin"
 usd_lib_dependencies = [
     "arch",
     "tf",
@@ -335,7 +336,7 @@ usd_lib_dependencies = [
     "python"
 ]
 additional_library_dirs = [
-    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin/OmniCae"
+    "${root}/_build/%{platform}/%{config}/schemas/usd/plugin"
 ]
 additional_include_dirs = [
     "${root}/_build/generated/schemas"

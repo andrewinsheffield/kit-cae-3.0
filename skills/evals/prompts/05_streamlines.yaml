@@ -8,13 +8,13 @@ data_file: disk_out_ref.npz
 validator: validators/validate_05.py
 
 prompt: |
-  Import `data/disk_out_ref.npz` into Kit-CAE as "SIDS Unstructured" schema.
+  Import `data/disk_out_ref.npz` into Kit-CAE using the "CGNS" schema.
   Create streamlines seeded from a sphere, with:
   - Velocity driven by the "V" field
   - Color mapped to temperature (the "Temp" field)
 
-  Remember that NPZ files imported as SIDS Unstructured require a field
-  association fix before streamlines work.
+  Bind `V` and `Temp` by their OmniSci field instance names; they are APIs on
+  the imported dataset, not child field prims.
 
   Capture a clean screenshot at 1280x720 and save to
   `{render_dir}/eval_05_streamlines.png`.

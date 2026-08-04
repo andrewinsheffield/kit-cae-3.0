@@ -45,14 +45,14 @@ console = Console(theme=theme)
 
 
 def fetch_dependencies(options, tool_config):
-    console.print(f"\[schema] Fetching dependencies for config: {options.config}", style=INFO_COLOR)
+    console.print(f"\\[schema] Fetching dependencies for config: {options.config}", style=INFO_COLOR)
 
     # Get packman files from config
     packman_files = tool_config.get("dependencies_packman_xml", [])
     if not packman_files:
         # print a warning
         console.print(
-            f"\[schema] No packman files found in config. Use 'dependencies_packman_xml' to specify the packman files to fetch in repo_tools.toml.",
+            f"\\[schema] No packman files found in config. Use 'dependencies_packman_xml' to specify the packman files to fetch in repo_tools.toml.",
             style=WARN_COLOR,
         )
         return
@@ -76,7 +76,7 @@ def fetch_dependencies(options, tool_config):
 
         invoke_tool("packman", args=packman_args, silent=True)
 
-    console.print(f"\[schema] Dependencies fetched for config: {options.config}", style=INFO_COLOR)
+    console.print(f"\\[schema] Dependencies fetched for config: {options.config}", style=INFO_COLOR)
 
 
 def generate_schemas(options, _tool_config, repo_usd_config):
@@ -85,28 +85,36 @@ def generate_schemas(options, _tool_config, repo_usd_config):
     This generates C++ and Python source files from .usda schema definitions.
     The actual compilation is handled by premake via repo_build.
     """
-    console.print(f"\[schema] Generating schemas", style=INFO_COLOR)
+    console.print(f"\\[schema] Generating schemas", style=INFO_COLOR)
 
-    # Create directories based on each plugin's generate_dir
-    # This ensures the directories exist before repo_usd tries to write to them
+    root = os.path.abspath(resolve_tokens("${root}"))
+    generated_root = os.path.join(root, "_build", "generated", "schemas")
+
+    # Recreate each generated schema directory before invoking repo_usd. usdGenSchema
+    # does not delete files for classes that were removed or moved to a different
+    # schema library, and stale files can be picked up by generated build files.
     plugins = repo_usd_config.get("plugin", {})
     for _plugin_name, plugin_config in plugins.items():
         generate_dir = plugin_config.get("generate_dir")
         if generate_dir:
-            resolved_dir = resolve_tokens(generate_dir)
+            resolved_dir = os.path.abspath(resolve_tokens(generate_dir))
+            if os.path.commonpath([generated_root, resolved_dir]) != generated_root:
+                raise RuntimeError(f"Refusing to clean schema directory outside {generated_root}: {resolved_dir}")
+            if os.path.isdir(resolved_dir):
+                shutil.rmtree(resolved_dir)
             os.makedirs(resolved_dir, exist_ok=True)
-            console.print(f"\[schema] Created directory: {resolved_dir}", style=INFO_COLOR)
+            console.print(f"\\[schema] Prepared clean directory: {resolved_dir}", style=INFO_COLOR)
 
     # Invoke repo_usd to generate schema source code
     # repo_usd uses generate_dir from each plugin config in repo_schemas.toml
     invoke_tool("usd", args=["--configuration", options.config], tokens=[], silent=True)
 
-    console.print(f"\[schema] Schemas generated (will be built via repo_build)", style=INFO_COLOR)
+    console.print(f"\\[schema] Schemas generated (will be built via repo_build)", style=INFO_COLOR)
 
 
 def clean_schemas(options, tool_config):
     """Clean generated schema source files."""
-    console.print(f"\[schema] Cleaning schemas", style=INFO_COLOR)
+    console.print(f"\\[schema] Cleaning schemas", style=INFO_COLOR)
 
     # Get the root schema directory (parent of all schema directories)
     schema_generated_source_root = tool_config.get("schema_generated_source_root", "${root}/_schemas/source")
@@ -115,9 +123,9 @@ def clean_schemas(options, tool_config):
 
     if os.path.exists(schemas_parent):
         shutil.rmtree(schemas_parent)
-        console.print(f"\[schema] Removed {schemas_parent}", style=INFO_COLOR)
+        console.print(f"\\[schema] Removed {schemas_parent}", style=INFO_COLOR)
     else:
-        console.print(f"\[schema] Nothing to clean, {schemas_parent} does not exist", style=INFO_COLOR)
+        console.print(f"\\[schema] Nothing to clean, {schemas_parent} does not exist", style=INFO_COLOR)
 
 
 def configure_pluginfo(options, repo_usd_config):
@@ -128,13 +136,13 @@ def configure_pluginfo(options, repo_usd_config):
     plugInfo.json files to the extension directory (premake postbuildcommands already
     copied the unconfigured versions during the build phase).
     """
-    console.print(f"\[schema] Configuring plugInfo.json for config: {options.config}", style=INFO_COLOR)
+    console.print(f"\\[schema] Configuring plugInfo.json for config: {options.config}", style=INFO_COLOR)
 
     # Use repo_usd's built-in --configure-pluginfo to handle token replacement
     # in the install_root (schemas/ directory). repo_usd reads install_root and
     # other paths from repo_schemas.toml [repo_usd.plugin.*] configuration.
     invoke_tool("usd", args=["--configuration", options.config, "--configure-pluginfo"], tokens=[], silent=True)
-    console.print(f"\[schema] PlugInfo.json configured for config: {options.config}", style=INFO_COLOR)
+    console.print(f"\\[schema] PlugInfo.json configured for config: {options.config}", style=INFO_COLOR)
 
     # Copy schema outputs (plugin resources, Python modules, native libs) to extension directory.
     # This replaces premake postbuildcommands which can't be used because:
@@ -146,20 +154,42 @@ def configure_pluginfo(options, repo_usd_config):
 
     schemas_root = os.path.join(root, "_build", platform, config, "schemas")
     ext_dir = os.path.join(root, "_build", platform, config, "exts", "omni.cae.schema")
+    schema_plugin_root = os.path.join(ext_dir, "usd", "plugin")
+    schema_python_root = os.path.join(ext_dir, "lib", "python", "pxr")
+    legacy_python_root = os.path.join(ext_dir, "usd", "python")
+
+    if os.path.isdir(schema_plugin_root):
+        shutil.rmtree(schema_plugin_root)
+    os.makedirs(schema_plugin_root, exist_ok=True)
+    shutil.copy2(
+        os.path.join(root, "source", "extensions", "omni.cae.schema", "templates", "plugInfo.json.in"),
+        os.path.join(schema_plugin_root, "plugInfo.json"),
+    )
+    if os.path.isdir(schema_python_root):
+        shutil.rmtree(schema_python_root)
+    if os.path.isdir(legacy_python_root):
+        shutil.rmtree(legacy_python_root)
+    os.makedirs(schema_python_root, exist_ok=True)
+    shutil.copy2(
+        os.path.join(root, "source", "extensions", "omni.cae.schema", "templates", "pxr_init.py"),
+        os.path.join(schema_python_root, "__init__.py"),
+    )
 
     plugins = repo_usd_config.get("plugin", {})
+    native_lib_prefix = repo_usd_config.get("lib_prefix", "" if sys.platform == "win32" else "lib")
+    native_lib_suffix = repo_usd_config.get("lib_suffix", ".dll" if sys.platform == "win32" else ".so")
     copy_count = 0
-    for _plugin_name, plugin_cfg in plugins.items():
-        library_prefix = plugin_cfg.get("library_prefix", _plugin_name)
-        display_name = library_prefix[0].upper() + library_prefix[1:]
-        resources_dir = plugin_cfg.get("resources_dir", os.path.join("plugins", display_name, "resources"))
-        module_dir = plugin_cfg.get("module_dir", display_name)
+    for plugin_name, plugin_cfg in plugins.items():
+        library_prefix = plugin_cfg.get("library_prefix", plugin_name)
+        plugin_dir_name = plugin_name[0].lower() + plugin_name[1:]
+        resources_dir = plugin_cfg.get("resources_dir", os.path.join("usd", "plugin", plugin_dir_name, "resources"))
+        module_dir = plugin_cfg.get("module_dir", os.path.join("lib", "python", "pxr", library_prefix))
         lib_dir = plugin_cfg.get("lib_dir", "lib")
         bin_dir = plugin_cfg.get("bin_dir", "bin")
 
         # Copy plugin resources (includes configured plugInfo.json).
         # resources_dir points at the plugin-local resources folder, e.g.
-        # usd/plugin/OmniCae/resources, so copy the plugin root directory.
+        # usd/plugin/omniCae/resources, so copy the plugin root directory.
         src_plugins = os.path.join(schemas_root, os.path.dirname(resources_dir))
         dst_plugins = os.path.join(ext_dir, os.path.dirname(resources_dir))
         if os.path.isdir(src_plugins):
@@ -175,14 +205,15 @@ def configure_pluginfo(options, repo_usd_config):
                 shutil.rmtree(dst_module)
             shutil.copytree(src_module, dst_module)
 
-        # Copy native library (lib name uses lowercase first char: OmniCae -> omniCae)
+        # Copy native library. New CAE USD packages keep libraries directly in
+        # usd/plugin, with the platform prefix controlled by repo_schemas.toml.
         lib_base = library_prefix[0].lower() + library_prefix[1:]
         if sys.platform == "linux":
-            lib_name = f"lib{lib_base}.so"
+            lib_name = f"{native_lib_prefix}{lib_base}{native_lib_suffix}"
             src_lib = os.path.join(schemas_root, lib_dir, lib_name)
             dst_lib_dir = os.path.join(ext_dir, lib_dir)
         else:
-            src_lib = os.path.join(schemas_root, bin_dir, f"{lib_base}.dll")
+            src_lib = os.path.join(schemas_root, bin_dir, f"{native_lib_prefix}{lib_base}{native_lib_suffix}")
             dst_lib_dir = os.path.join(ext_dir, bin_dir)
             # Do not copy the Windows import .lib into the extension package.
             # It is a link-time artifact, not a runtime dependency.
@@ -193,7 +224,7 @@ def configure_pluginfo(options, repo_usd_config):
 
         copy_count += 1
 
-    console.print(f"\[schema] Copied {copy_count} configured plugInfo.json to extension", style=INFO_COLOR)
+    console.print(f"\\[schema] Copied {copy_count} configured plugInfo.json to extension", style=INFO_COLOR)
 
 
 def run_repo_tool(options, config):
@@ -205,11 +236,11 @@ def run_repo_tool(options, config):
     """
     if not options.no_warn:
         console.print(
-            "\[schema] WARNING: `repo schema` is no longer needed. Use `repo build` instead, which generates and builds schemas automatically.",
+            "\\[schema] WARNING: `repo schema` is no longer needed. Use `repo build` instead, which generates and builds schemas automatically.",
             style=WARN_COLOR,
         )
 
-    console.print("\[schema] Generating CAE USD schemas", style=INFO_COLOR)
+    console.print("\\[schema] Generating CAE USD schemas", style=INFO_COLOR)
 
     # Get tool configuration
     tool_config = config.get("repo_schema", {})

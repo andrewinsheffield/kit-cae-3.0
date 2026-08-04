@@ -1,6 +1,13 @@
 # Omni CAE Schema [omni.cae.schema]
 
-This extension is an internal extension designed that brings in OmniCae schemas into Omniverse. It also provides
-Python bindings for the USD Schemas. To access the OmniCae schemas in Python, you can use `omni.cae.schema`
-Python package in dependent extensions or Kit applications. The USD schema plugins themselves are discovered and
-registered at startup by `omni/cae/schema/extension.py`.
+This internal extension registers the Kit-CAE-owned `OmniCaeViz` schemas and the
+legacy `OmniCae` compatibility schemas. It also provides their Python bindings.
+The USD schema plugins are discovered and registered at startup by
+`omni/cae/schema/extension.py`.
+
+Schemas supplied by other USD plugin packages are imported directly from `pxr` after their provider extension is
+enabled; they are not re-exported from `omni.cae.schema`. In particular, the
+active `OmniSci*` scientific-data schemas come from `omni.cae.usd_plugins`.
+
+See the repository's [Scientific Data Schemas](../../../../docs/UsdSchemas.md)
+guide for schema ownership and the active-versus-legacy boundary.

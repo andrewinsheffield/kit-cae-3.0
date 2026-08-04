@@ -1,180 +1,101 @@
 #!/usr/bin/env python3
-"""
-Query field statistics from a Kit-CAE dataset.
-
-Imports a file, discovers all data fields, and prints per-field statistics
-(min, max, mean, median, quartiles, histogram) in a structured format that
-an agent can parse and report to users.
+"""Query statistics for OmniSci arrays in a native scientific asset.
 
 Environment variables:
-    CAE_STATS_FILE      (required)  Path to the data file
-    CAE_STATS_FORMAT    (optional)  Force format: cgns | vtk | ensight | npz
-                                    Auto-detected from extension if omitted
-    CAE_STATS_FIELDS    (optional)  Comma-separated field prim paths to query.
-                                    If omitted, queries all discovered data fields.
+    CAE_STATS_FILE      Required path to a supported file.
+    CAE_STATS_FIELDS    Optional comma-separated OmniSci field instance names.
+    CAE_STATS_SCHEMA    Optional NPZ interpretation: Point Cloud, CGNS, or None.
 
-Runs inside Kit-CAE via --exec:
+Run inside Kit-CAE:
     CAE_STATS_FILE=/path/to/data.cgns ./repo.sh launch -n omni.cae.kit -- \
         --exec skills/cae-core/scripts/query_stats.py --no-window
 """
+
 import asyncio
 import json
 import os
-import sys
 
+import numpy as np
 import omni.kit.app
-import omni.usd
-from omni.cae.data import array_utils, usd_utils
-from omni.cae.schema import cae
+from omni.cae.core import array_utils, usd_utils
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
-from pxr import Tf, Usd
-
-import usdrt
+from pxr import OmniSci, Usd
 
 
 async def main():
     app = omni.kit.app.get_app()
-
     file_path = os.environ.get("CAE_STATS_FILE", "")
     if not file_path or not os.path.isfile(file_path):
-        print(f"ERROR: CAE_STATS_FILE not set or file not found: '{file_path}'")
-        app.post_quit()
-        for _ in range(10):
-            await app.next_update_async()
-        os._exit(1)
+        print(f"ERROR: CAE_STATS_FILE not set or file not found: {file_path!r}")
+        await _quit(app, 1)
+        return
 
-    forced_format = os.environ.get("CAE_STATS_FORMAT", "").lower()
-    requested_fields = os.environ.get("CAE_STATS_FIELDS", "")
+    import_args = {}
+    if file_path.lower().endswith(".npz") and (schema := os.environ.get("CAE_STATS_SCHEMA")):
+        import_args["schema"] = schema
 
-    # Detect format from extension
-    ext = os.path.splitext(file_path)[1].lower()
-    fmt = forced_format or {
-        ".cgns": "cgns", ".vti": "vtk", ".vtu": "vtk", ".vts": "vtk",
-        ".vtp": "vtk", ".vtk": "vtk", ".case": "ensight", ".encas": "ensight",
-        ".npz": "npz", ".npy": "npz",
-    }.get(ext, "")
-
-    if not fmt:
-        print(f"ERROR: Cannot detect format for extension '{ext}'. Set CAE_STATS_FORMAT.")
-        app.post_quit()
-        for _ in range(10):
-            await app.next_update_async()
-        os._exit(1)
-
-    # Import
-    prim_path = "/World/StatsTarget"
-    print(f"Importing {file_path} as {fmt}...")
-    if fmt == "cgns":
-        from omni.cae.importer.cgns import import_to_stage
-        await import_to_stage(file_path, prim_path)
-    elif fmt == "vtk":
-        from omni.cae.importer.vtk import import_to_stage
-        await import_to_stage(file_path, prim_path)
-    elif fmt == "ensight":
-        from omni.cae.importer.ensight import import_to_stage
-        await import_to_stage(file_path, prim_path)
-    elif fmt == "npz":
-        from omni.cae.importer.npz import import_to_stage
-        await import_to_stage(file_path, prim_path, schema_type="SIDS Unstructured")
-
-    stage = get_context().get_stage()
-
-    # Wait for data delegates to load
-    for _ in range(30):
+    print(f"Importing {file_path}...")
+    await import_to_stage(file_path, "/World/StatsTarget", **import_args)
+    for _ in range(10):
         await app.next_update_async()
 
-    # Discover datasets and fields via USDRT
-    fabric_stage = usdrt.Usd.Stage.Attach(omni.usd.get_context().get_stage_id())
+    stage = get_context().get_stage()
+    datasets = [prim for prim in stage.Traverse() if prim.IsA(OmniSci.Dataset)]
+    requested = {name.strip() for name in os.environ.get("CAE_STATS_FIELDS", "").split(",") if name.strip()}
 
-    dataset_type = Tf.Type.Find(cae.DataSet)
-    datasets = [p.GetString() for p in fabric_stage.GetPrimsWithTypeName(dataset_type.typeName)]
-
-    field_base_type = Tf.Type.Find(cae.FieldArray)
-    all_fields = [p.GetString() for p in fabric_stage.GetPrimsWithTypeName(field_base_type.typeName)]
-
-    # Filter to data fields (skip mesh/coordinate arrays)
-    containers = [
-        "PointData", "CellData", "FlowSolution", "Flow_Solution",
-        "SolutionCellCenter", "SolutionVertex",
-        "Variables", "NumPyArrays",
-    ]
-    data_fields = [f for f in all_fields
-                   if any(f"/{c}/" in f or f.endswith(f"/{c}") for c in containers)]
-    if not data_fields:
-        data_fields = all_fields
-
-    # If specific fields requested, filter to those
-    if requested_fields:
-        target_fields = [f.strip() for f in requested_fields.split(",") if f.strip()]
-        data_fields = [f for f in data_fields if f in target_fields]
-
-    # Print dataset summary
     result = {
         "file": file_path,
-        "format": fmt,
-        "datasets": datasets,
+        "datasets": [str(prim.GetPath()) for prim in datasets],
         "fields": {},
     }
 
-    for field_path in sorted(data_fields):
-        prim = stage.GetPrimAtPath(field_path)
-        if not prim.IsValid():
-            continue
-
-        field_info = {"path": field_path}
-
-        try:
-            farray = await usd_utils.get_array(prim, Usd.TimeCode.EarliestTime())
-            if farray is None:
-                field_info["error"] = "Could not read array data"
-                result["fields"][field_path] = field_info
+    for dataset in datasets:
+        for field_name in usd_utils.get_instances(dataset, "OmniSciFieldAPI"):
+            if requested and field_name not in requested:
                 continue
+            key = f"{dataset.GetPath()}#{field_name}"
+            result["fields"][key] = await _field_info(dataset, field_name)
 
-            field_info["dtype"] = str(farray.dtype)
-            field_info["shape"] = list(farray.shape)
-            field_info["device"] = str(array_utils.get_device(farray))
-
-            # Component-wise ranges
-            ranges = array_utils.get_componentwise_ranges(farray)
-            field_info["ranges"] = [{"component": i, "min": r[0], "max": r[1]}
-                                    for i, r in enumerate(ranges)]
-
-            # Scalar stats (histogram, mean, median, quartiles) for scalar fields
-            is_scalar = farray.ndim == 1 or farray.shape[-1] == 1
-            if is_scalar:
-                stats = array_utils.get_scalar_stats(farray, num_bins=32)
-                field_info["statistics"] = {
-                    "min": stats["min"],
-                    "max": stats["max"],
-                    "mean": stats["mean"],
-                    "median": stats["median"],
-                    "q1": list(stats["q1"]),
-                    "q2": list(stats["q2"]),
-                    "q3": list(stats["q3"]),
-                    "q4": list(stats["q4"]),
-                    "histogram": {
-                        "counts": stats["counts"],
-                        "bin_edges": stats["bin_edges"],
-                    },
-                }
-            else:
-                field_info["statistics"] = "Vector field — per-component ranges above. " \
-                    "Use magnitude or individual components for scalar statistics."
-
-        except Exception as e:
-            field_info["error"] = str(e)
-
-        result["fields"][field_path] = field_info
-
-    # Output as JSON for easy parsing
     print("STATS_BEGIN")
     print(json.dumps(result, indent=2, default=str))
     print("STATS_END")
+    await _quit(app, 0)
 
-    app.post_quit()
+
+async def _field_info(dataset: Usd.Prim, field_name: str) -> dict:
+    info = {"dataset": str(dataset.GetPath()), "field": field_name}
+    attr = dataset.GetAttribute(f"omni:sci:array:{field_name}:value")
+    if not attr:
+        return {**info, "error": "Missing OmniSci array value attribute"}
+
+    try:
+        value = await asyncio.to_thread(attr.Get, Usd.TimeCode.EarliestTime())
+        if value is None:
+            return {**info, "error": "Array has no value"}
+        array = np.asarray(value)
+        info.update(
+            dtype=str(array.dtype),
+            shape=list(array.shape),
+            ranges=[
+                {"component": index, "min": bounds[0], "max": bounds[1]}
+                for index, bounds in enumerate(array_utils.get_componentwise_ranges(array))
+            ],
+        )
+        if array.ndim == 1 or array.shape[-1] == 1:
+            info["statistics"] = array_utils.get_scalar_stats(array, num_bins=32)
+        else:
+            info["statistics"] = "Vector field; use a component or magnitude for scalar statistics"
+    except Exception as error:
+        info["error"] = str(error)
+    return info
+
+
+async def _quit(app, exit_code: int):
+    app.post_quit(exit_code)
     for _ in range(10):
         await app.next_update_async()
-    os._exit(0)
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -8,9 +8,9 @@
 [[dependency]]
 python = "../../_build/target-deps/python"
 packages = [
-    "nvtx==0.2.14",
-    "pyparsing==3.2.3",
-    "trimesh==4.11.2",
+    "nvtx==0.2.15",
+    "pyparsing==3.3.2",
+    "trimesh==4.12.2",
 ]
 target = "../../_build/target-deps/pip_prebundle"
 platforms = ["*"]

@@ -11,12 +11,22 @@
 from logging import getLogger
 
 import omni.kit.test
-from omni.cae.testing import new_stage
+from omni.cae.testing import new_stage, wait_for_rtx_renderer_ready
 
 logger = getLogger(__name__)
 
 
 class Test(omni.kit.test.AsyncTestCase):
+    _rtx_renderer_ready = False
+
+    async def setUp(self):
+        if not type(self)._rtx_renderer_ready:
+            logger.info("Waiting for RTX renderer readiness")
+            print("Waiting for RTX renderer readiness")
+            await wait_for_rtx_renderer_ready()
+            type(self)._rtx_renderer_ready = True
+            logger.info("RTX renderer is ready")
+            print("RTX renderer is ready")
 
     def is_windows(self):
         import platform
@@ -47,6 +57,42 @@ class Test(omni.kit.test.AsyncTestCase):
             await example_faces.main()
             logger.info("Faces example completed")
 
+    async def test_example_flash_axisymmetric_volume(self):
+        from scripts import example_flash_axisymmetric_volume
+
+        if self.is_windows():
+            logger.warning("Skipping FLASH axisymmetric volume example on Windows.")
+            return
+
+        async with new_stage():
+            logger.info("Running FLASH axisymmetric volume example")
+            await example_flash_axisymmetric_volume.main()
+            logger.info("FLASH axisymmetric volume example completed")
+
+    async def test_example_flash_iso_surface(self):
+        from scripts import example_flash_iso_surface
+
+        if self.is_windows():
+            logger.warning("Skipping FLASH iso-surface example on Windows.")
+            return
+
+        async with new_stage():
+            logger.info("Running FLASH iso-surface example")
+            await example_flash_iso_surface.main()
+            logger.info("FLASH iso-surface example completed")
+
+    async def test_example_flash_planar_slice(self):
+        from scripts import example_flash_planar_slice
+
+        if self.is_windows():
+            logger.warning("Skipping FLASH planar-slice example on Windows.")
+            return
+
+        async with new_stage():
+            logger.info("Running FLASH planar-slice example")
+            await example_flash_planar_slice.main()
+            logger.info("FLASH planar-slice example completed")
+
     async def test_example_glyphs(self):
         from scripts import example_glyphs
 
@@ -58,6 +104,30 @@ class Test(omni.kit.test.AsyncTestCase):
             logger.info("Running glyphs example")
             await example_glyphs.main()
             logger.info("Glyphs example completed")
+
+    async def test_example_headsq_vti(self):
+        from scripts import example_headsq_vti
+
+        if self.is_windows():
+            logger.warning("Skipping VTI example on Windows due to known issues with the example.")
+            return
+
+        async with new_stage():
+            logger.info("Running VTI example")
+            await example_headsq_vti.main()
+            logger.info("VTI example completed")
+
+    async def test_example_iso_surface(self):
+        from scripts import example_iso_surface
+
+        if self.is_windows():
+            logger.warning("Skipping iso-surface example on Windows.")
+            return
+
+        async with new_stage():
+            logger.info("Running iso-surface example")
+            await example_iso_surface.main()
+            logger.info("Iso-surface example completed")
 
     async def test_example_npz_flow(self):
         from scripts import example_npz_flow
@@ -118,6 +188,18 @@ class Test(omni.kit.test.AsyncTestCase):
             logger.info("Running points example")
             await example_points.main()
             logger.info("Points example completed")
+
+    async def test_example_planar_slice(self):
+        from scripts import example_planar_slice
+
+        if self.is_windows():
+            logger.warning("Skipping planar-slice example on Windows.")
+            return
+
+        async with new_stage():
+            logger.info("Running planar-slice example")
+            await example_planar_slice.main()
+            logger.info("Planar-slice example completed")
 
     async def test_example_slice(self):
         from scripts import example_slice

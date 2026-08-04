@@ -1,16 +1,17 @@
 ---
 name: cae-visualization
 description: >
-  Visualize and analyze simulation data using NVIDIA Kit-CAE (Omniverse). Supports CGNS,
-  VTK (.vti/.vtu/.vts/.vtp/.vtk), EnSight Gold (.case/.encas), OpenFOAM (.foam), NumPy
-  (.npz/.npy), EDEM (.dem), and custom formats. Covers volume rendering, faces, slices,
-  streamlines, glyphs, points, flow animation, bounding boxes, field statistics,
-  multi-domain composition, and time-varying animation. Triggers on any request
-  involving simulation post-processing, CAE visualization, scientific data rendering,
-  or field data analysis.
+  Visualize and analyze simulation data using NVIDIA Kit-CAE (Omniverse). Supports
+  native CAE USD-plugin formats including CGNS, VTK, EnSight Gold, OpenFOAM, NumPy,
+  EDEM, NanoVDB, FLASH AMR, Eclipse reservoir data, and Trimesh assets. Covers volume
+  rendering, faces, geometry and volume slices, iso-surfaces, streamlines, glyphs,
+  points, flow animation, field-driven opacity, derived arrays, dataset representations,
+  ROI processing, field statistics, multi-domain composition, and time-varying
+  animation. Triggers on any request involving simulation post-processing, CAE
+  visualization, scientific data rendering, or field data analysis.
 depends:
   - cae-core
-version: "2.1.0"
+version: "3.0.0"
 metadata:
   author: "NVIDIA"
   tags:
@@ -24,6 +25,9 @@ metadata:
     - volume-rendering
     - streamlines
     - colormap
+    - iso-surface
+    - flash
+    - reservoir
 ---
 
 # CAE Visualization
@@ -35,23 +39,29 @@ For clean render-product capture (images/movies without UI), see `cae-capture`.
 
 ## Purpose
 
-Visualize and analyze simulation data in Kit-CAE: volume rendering, faces, slices, streamlines, glyphs, points, flow animation, field statistics, multi-domain composition, and time-varying animation. Wraps the underlying `omni.cae.viz` operators with format-agnostic stage discovery.
+Use schema-authored `omni.cae.viz` operators, format-agnostic OmniSci stage
+discovery, optional dataset representations, and native or derived arrays.
 
 ## Prerequisites
 
-`cae-core` (loaded automatically as a dependency). For VTK formats: run `./repo.sh pip_download`. See `## Dependencies` below.
+`cae-core` (loaded automatically as a dependency). Native format plugins,
+including VTK, are available in the standard application.
 
 ## Instructions
 
-Follow the workflow in order: Inspect (`## 1. Inspect`) → Query field statistics (`## 2. Query Field Statistics`) → Choose visualization (`## 3. Choose Visualization`) → Write & run a script (`## 4. Write & Run Script`). Topic sections below cover color mapping, glyph sizing, time-varying data, and multi-domain composition.
-
-## Examples
-
-End-to-end script template is in `## 4. Write & Run Script` below. Per-feature examples are embedded inline under `## Color Mapping`, `## Glyph Sizing`, `## Time-Varying Data`, and `## Multi-Domain Composition`.
+Follow the workflow in order: Inspect (`## 1. Inspect`) → Query field statistics
+(`## 2. Query Field Statistics`) → Choose input processing and representation
+(`## 3. Choose Input Processing`) → Choose visualization (`## 4. Choose
+Visualization`) → Write and run a script (`## 5. Write & Run Script`).
 
 ## Limitations
 
-IndeX-backed volume rendering requires an IndeX license. `PlanarSlice` is texture-mapped only — no contour extraction. Time-varying playback requires the source format to expose a time index (see `cae-core/references/formats.md`).
+IndeX-backed volume rendering, including direct axisymmetric FLASH volume
+rendering, requires an IndeX license. Geometry-based `PlanarSlice` and
+`IsoSurface` extraction do not. Time-varying playback requires the source
+format to expose time samples (see `cae-core/references/formats.md`). Array
+Expressions are array-level only: they do not provide topology, connectivity,
+gradients, or spatial derivatives.
 
 ## Incremental Visualization Rule
 
@@ -74,6 +84,11 @@ Do not debug animation until the static visualization renders correctly.
 - `cae-core/references/kit-cae-api.md` — **All viz commands, field binding, stage discovery, statistics, script template**
 - `cae-core/references/formats.md` — Per-format import signatures and stage paths
 - `cae-core/references/extensibility.md` — Custom format onboarding
+- `references/iso-surfaces.md` — Iso-value extraction and output coloring
+- `references/opacity-mapping.md` — Independent color and opacity mapping
+- `references/derived-arrays.md` — Array Expressions for visualization inputs
+- `references/dataset-representations.md` — FLASH axisymmetric, dual, and direct volume paths
+- `references/roi-and-subsetting.md` — Interactive ROI processing
 
 *Always run the preflight checklist from `cae-core/SKILL.md` first.*
 
@@ -84,7 +99,7 @@ engineering terms, and ask what to visualize.
 
 ```bash
 # VTK files:
-CAE_INSPECT_FILE=<file> ./repo.sh launch -n omni.cae_vtk.kit -- \
+CAE_INSPECT_FILE=<file> ./repo.sh launch -n omni.cae.kit -- \
     --exec skills/cae-core/scripts/inspect_vtk.py --no-window
 
 # CGNS files:
@@ -106,30 +121,54 @@ CAE_STATS_FILE=<file> ./repo.sh launch -n omni.cae.kit -- \
 
 Use statistics to choose meaningful colormap ranges and validate data.
 
-## 3. Choose Visualization
+## 3. Choose Input Processing
+
+Choose representation and preprocessing before choosing the output operator.
+These APIs apply to a matching `DatasetSelectionAPI` role, normally `"source"`.
+
+| Need | API / workflow | Notes |
+|------|----------------|-------|
+| Derived scalar/vector field | `CaeArrayExpressionAPI:<name>` | Lazy array-level expressions; see `references/derived-arrays.md` |
+| Mesh region of interest | `DatasetSubsetAPI:source` | Cell selection by ROI bounds; see `references/roi-and-subsetting.md` |
+| Voxelized region of interest | `DatasetVoxelizationAPI:source` | Limits the voxelized input using an ROI |
+| Point cloud as logical cells | `DatasetVoronoiPointCloudAPI:source` | Treats source points as Voronoi seeds |
+| Revolved FLASH mesh | `DatasetAxisymmetricRepresentationAPI:source` | Controls angular cells and angle range |
+| FLASH dual topology | `DatasetDualAPI:source` | Automatically authored for supported iso-surface/slice workflows |
+| Direct FLASH volume | `CreateCaeVizVolume` type=`axisymmetric` | Compact native-resolution IndeX path |
+
+Do not author representation APIs speculatively. Inspect the dataset model, then
+use the capability-specific workflow in `references/dataset-representations.md`.
+
+## 4. Choose Visualization
 
 | Type | Command | Use for |
 |------|---------|---------|
 | Faces | `CreateCaeVizFaces` | Surface extraction, boundaries |
+| Iso Surface | `CreateCaeVizIsoSurface` | Triangular surface at a scalar iso-value |
 | Volume (VDB) | `CreateCaeVizVolume` type=vdb | Structured grids, large datasets, point clouds |
 | Volume (irregular) | `CreateCaeVizVolume` type=irregular | Unstructured grids with cell topology |
-| Slice | `CreateCaeVizVolumeSlice` | Cutting planes through volumes |
+| Volume (axisymmetric) | `CreateCaeVizVolume` type=axisymmetric | Direct FLASH AMR rendering without revolved geometry |
+| Geometry Planar Slice | `CreateCaeVizPlanarSlice` | Independent extracted triangles; no IndeX license |
+| IndeX Volume Slice | `CreateCaeVizVolumeSlice` | Slice attached to an existing volume operator |
 | Streamlines | `CreateCaeVizStreamlines` | Flow paths (needs velocity field) |
 | Glyphs | `CreateCaeVizGlyphs` | Vector arrows/cones/spheres |
 | Points | `CreateCaeVizPoints` | Point clouds, node inspection |
 | Bounding Box | `CreateCaeVizBoundingBox` | Wireframe bounds, ROI, framing |
 | Flow | Flow API | Animated smoke/particle flow |
 
+Use a geometry planar slice when the user wants extracted cross-sections,
+multi-plane output, or a license-free slice. Use a volume slice when the user
+already has an IndeX volume and wants renderer-side probing.
+
 Full command syntax and field binding: `kit-cae-api.md` § Visualization Commands.
 
-## 4. Write & Run Script
+## 5. Write & Run Script
 
 Use the script template from `kit-cae-api.md` § Script Template.
 
 ```bash
 cd <kit-cae-dir>
-./repo.sh launch -n omni.cae_vtk.kit -- --exec scripts/<script>.py --no-window   # VTK
-./repo.sh launch -n omni.cae.kit -- --exec scripts/<script>.py --no-window        # others
+./repo.sh launch -n omni.cae.kit -- --exec scripts/<script>.py --no-window
 ```
 
 ## Mid-session imports (streaming / long-lived sessions)
@@ -158,11 +197,27 @@ patterns): `cae-streaming/SKILL.md`.
 ### Field Binding
 
 ```python
-cae_viz.FieldSelectionAPI(viz_prim, "colors").CreateTargetRel().SetTargets([field_path])
+cae_viz.FieldSelectionAPI(viz_prim, "colors").CreateFieldNamesAttr().Set([field_name])
 ```
 
 Three modes: scalar (N,1) → by value; vector (N,3) → by magnitude; three
 separate scalars → Kit-CAE interprets as vector, colors by magnitude.
+
+### Independent Surface Opacity
+
+Faces, Points, Glyphs, Iso Surfaces, Streamlines, and Planar Slices can bind an
+independent scalar through `FieldSelectionAPI:opacity`. This is separate from
+volume transfer-function alpha and separate from the `colors` field:
+
+```python
+cae_viz.FieldSelectionAPI(viz_prim, "opacity").CreateFieldNamesAttr().Set(
+    ["VolumeFraction"]
+)
+```
+
+Configure its own domain, LUT, multiplier, and auto-rescale behavior. A
+texture-enabled Colormap publishes distinct dynamic color and opacity URLs.
+See `references/opacity-mapping.md`.
 
 ### Colormap & Domain
 
@@ -235,10 +290,13 @@ volumes.
 **Always query actual data statistics before setting domain:**
 
 ```python
-from omni.cae.data import array_utils, usd_utils
+import asyncio
+import numpy as np
+from omni.cae.core import array_utils
 
-field_prim = stage.GetPrimAtPath(field_path)
-farray = await usd_utils.get_array(field_prim, Usd.TimeCode.EarliestTime())
+array_attr = dataset_prim.GetAttribute(f"omni:sci:array:{field_name}:value")
+value = await asyncio.to_thread(array_attr.Get, Usd.TimeCode.EarliestTime())
+farray = np.asarray(value)
 ranges = array_utils.get_componentwise_ranges(farray)
 min_val, max_val = float(ranges[0][0]), float(ranges[0][1])
 print(f"Field range: [{min_val}, {max_val}]")
@@ -312,34 +370,15 @@ for prim in stage.Traverse():
 ### Import with Time Mapping
 
 ```python
-# CGNS / EnSight — time_scale spaces steps on timeline
-await import_to_stage(path, prim_path, time_scale=2.0, time_offset=0.0, time_source="TimeStep")
+# CGNS / EnSight — scale spaces native steps on the USD timeline
+await import_to_stage(path, prim_path, scale=2.0, offset=0.0, source="TimeStep")
 ```
 
-`time_scale=2` places steps 2 frames apart for temporal interpolation.
+`scale=2` places steps two time codes apart for temporal interpolation.
 
-### Time-Coded File References (Custom Formats)
-
-For custom formats with one file per timestep, set time-coded `fileNames` on
-the class prim so the delegate reads the correct file at each time code:
-
-```python
-class_prim = stage.GetPrimAtPath(class_prim_path)
-file_attr = class_prim.GetAttribute("fileNames")
-for frame in range(total_frames):
-    step = min(int(frame / frames_per_step), num_steps - 1)
-    file_attr.Set([Sdf.AssetPath(step_file)], Usd.TimeCode(frame))
-```
-
-Then drive playback via `omni.timeline`:
-
-```python
-timeline = omni.timeline.get_timeline_interface()
-timeline.set_current_time(frame / fps)  # triggers delegate re-evaluation
-```
-
-**Do NOT** mutate `fileNames` at a single time code in a render loop —
-VDB voxelization caches may not invalidate. Always pre-set time-coded values.
+The file-format plugin authors time samples on OmniSci array attributes. Do not
+mutate payload paths or legacy `fileNames` attributes during playback; drive the
+USD timeline and let the operator controller select the effective sample.
 
 ### Temporal Interpolation
 
@@ -348,24 +387,13 @@ cae_viz.OperatorTemporalAPI.Apply(viz_prim)
 cae_viz.OperatorTemporalAPI(viz_prim).CreateEnableFieldInterpolationAttr().Set(True)
 ```
 
-### Time Sample Mapping
-
-Decouple data steps from animation frames via USD time samples:
-
-```python
-ts_attr = field_prim.GetAttribute("ts")
-for frame in range(TOTAL_FRAMES + 1):
-    data_step = min(frame // 2, NSTEPS - 1)  # or any mapping
-    ts_attr.Set(data_step, Usd.TimeCode(frame))
-```
-
 ### Timeline Control
 
 ```python
 import omni.timeline
 tl = omni.timeline.get_timeline_interface()
 tl.set_time_codes_per_second(FPS)
-tl.set_current_time(frame / FPS)  # triggers delegate re-evaluation
+tl.set_current_time(frame / FPS)  # triggers operator re-evaluation
 ```
 
 Allow 6–10 settle frames after `set_current_time()` for data + render update.
@@ -374,16 +402,19 @@ Allow 6–10 settle frames after `set_current_time()` for data + render update.
 
 Lock range for time-varying data — see "Disable Auto-Rescale" above.
 
+Statistics and Array Details are time-aware. When the timeline changes, query
+the effective current sample or explicitly refresh stale UI statistics; do not
+silently reuse a range from another timestep.
+
 ## Multi-Domain Composition
 
 Import multiple datasets (even different formats) into the same stage:
 
 ```python
-from omni.cae.importer.ensight import import_to_stage as import_ensight
-from omni.cae.importer.cgns import import_to_stage as import_cgns
+from omni.cae.usd_plugins_importers import import_to_stage
 
-await import_ensight(struct_file, "/World/structural")
-await import_cgns(cfd_file, "/World/cfd")
+await import_to_stage(struct_file, "/World/structural")
+await import_to_stage(cfd_file, "/World/cfd")
 # Create operators on each independently
 ```
 
@@ -399,8 +430,8 @@ await import_to_stage(thermal_data, "/World/thermal")
 ## Point Cloud / AI Surrogate
 
 ```python
-from omni.cae.importer.npz import import_to_stage
-await import_to_stage(npz_path, "/World/inference", schema_type="Point Cloud")
+from omni.cae.usd_plugins_importers import import_to_stage
+await import_to_stage(npz_path, "/World/inference", schema="Point Cloud")
 ```
 
 Gaussian splatting for volumes from point clouds:
@@ -409,26 +440,30 @@ Gaussian splatting for volumes from point clouds:
 cae_viz.DatasetGaussianSplattingAPI(viz_prim, "source").CreateRadiusFactorAttr().Set(5.0)
 ```
 
-## Application Settings
-
-```python
-settings = carb.settings.get_settings()
-settings.set("/persistent/exts/omni.cae.data/computeDevice", "cuda:0")  # or "cpu"
-settings.set("/persistent/exts/omni.cae.data/boundsMethod", "cell")     # or "point"
-```
+When a downstream cell-based operator needs one logical cell per source point,
+apply `DatasetVoronoiPointCloudAPI:source` instead of inventing connectivity.
 
 Kit-CAE uses centimeters (cm) — no automatic unit conversion on import.
+
+`ScalarColor` is lighting-aware. Geometry-based planar slices use
+`UnlitScalarColor` so diagnostic scalar colors do not depend on scene lighting.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `No module vtk` / `h5py` | `./repo.sh pip_download` |
-| Never built | `./repo.sh build -r && ./repo.sh pip_download` |
+| `No module vtk` / `h5py` in a legacy workflow | `./repo.sh pip_download` |
+| Never built | `./repo.sh build -r` |
 | Empty screenshot | Increase wait frames (≥600) |
 | `UnboundLocalError` | Move `omni.*` imports to top level |
 | Faces `external_only not supported` | Use a surface/boundary dataset |
-| Missing velocity targets | Seed prim path wrong or prim doesn't exist yet |
+| Missing velocity field | Verify the OmniSci field instance names and the seed dataset target |
+| Iso-surface is empty | Verify contour association/range and choose an iso-value inside the field range; empty output is intentionally hidden |
+| Planar slice does not move | Transform the slice operator prim and call `wait_for_update()`; free mode uses transformed local +Y |
+| Surface opacity has no effect | Bind a scalar to `FieldSelectionAPI:opacity`, set a valid opacity domain/LUT, and enable opacity mapping |
+| Array Expression is absent from field discovery | Check diagnostics, ownership, enabled state, association compatibility, and dependency cycles |
+| FLASH result is too coarse | Increase `angularCells` for reconstructed representations; direct axisymmetric volume does not use angular tessellation |
+| Resolver asset does not open | Directory-scanning layouts may still require filesystem access; use a self-contained or explicitly linked asset |
 | First run slow | Shader cache compilation (~2–3 min) — see preflight |
 | Glyphs obscure volume | Reduce glyph scale: `GlyphsAPI(prim).CreateScaleAttr().Set(0.3)` |
 | Volume appears uniform | Query field stats, set colormap domain to actual data range |
@@ -438,8 +473,8 @@ Kit-CAE uses centimeters (cm) — no automatic unit conversion on import.
 | `Gf.Vec2f` type error | Cast numpy values with `float()` |
 | Point cloud volume empty | Set Gaussian splatting `RadiusFactor` (try 4–8) |
 | Volume has flat ambient wash | Hide default scene light (see Visibility) |
-| Time-varying data looks static | Use time-coded fileNames, not single-value mutation |
-| VDB doesn't update per frame | Pre-set time-coded fileNames; use timeline to drive time |
+| Time-varying data looks static | Verify imported array time samples and drive the timeline rather than mutating payload state. |
+| VDB doesn't update per frame | Check `OperatorTemporalAPI`, the effective USD time code, and plugin-authored samples. |
 | `UsdExpiredPrimAccessError` after long wait | Controller rebuilt the material prim. Re-fetch `stage.GetPrimAtPath(shader_path).GetAttribute(f"inputs:{name}")` each access instead of caching `shader.GetInput(...)` across `await wait_for_update(...)`. |
 
 ## Visual Validation Checklist
@@ -458,3 +493,7 @@ Do not rely only on transform, keyframe, or log checks. Verify:
    of the viewport, not be a tiny speck in the distance.
 5. **Contrast**: Light features against dark background (or vice versa). Avoid
    mid-gray-on-mid-gray.
+6. **Geometry correctness**: For iso-surfaces and planar slices, confirm the
+   extracted geometry changes when the iso-value, direction, or transform changes.
+7. **Opacity separation**: If opacity is field-driven, confirm color and opacity
+   respond independently by changing one binding or domain at a time.

@@ -13,7 +13,7 @@
 reloadable = false
 
 [package]
-version = "1.0.0"
+version = "1.1.0"
 title = "CAE IndeX"
 description = "Extension providing IndeX Python bindings and generic Python-based importers and compute tasks."
 category = "CAE"
@@ -23,7 +23,6 @@ changelog = "docs/CHANGELOG.md"
 icon = "data/icon.png"
 
 [dependencies]
-"omni.cae.data" = {}
 "omni.rtx.index_composite" = {}
 "omni.usd" = {}
 "omni.usd.core" = {}

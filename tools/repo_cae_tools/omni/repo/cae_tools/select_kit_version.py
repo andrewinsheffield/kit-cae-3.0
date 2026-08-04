@@ -94,7 +94,7 @@ Options:
     --dry-run: Validate files (standalone) or preview changes (with version options)
     --auto: Use tracked/default version and generate files (automation-friendly)
     --default: Use default version and generate files
-    --version <label>: Select and generate files for a specific version (e.g., "108.0.0")
+    --version <label>: Select and generate files for a specific version (e.g., "109.0.1")
     --use-symlinks / --no-use-symlinks: Toggle symlink vs copy mode for plain files (sticky, persisted in .kit_selection.json)
     --quiet: Suppress non-essential output for automation/CI (only shows errors)
 
@@ -582,7 +582,7 @@ def process_templates(version_label, common_templates, version_templates, variab
     Process all templates (both common and version-specific).
 
     Args:
-        version_label: The version label (e.g., "108.0.0", "109.0.1")
+        version_label: The version label (e.g., "109.0.1", "110.1.1")
         common_templates: List of common template dicts with 'src' and 'dest' keys
         version_templates: List of version-specific template dicts with 'src' and 'dest' keys
         variables: Dictionary of variables for substitution
@@ -1523,7 +1523,7 @@ def setup_repo_tool(parser, config):
     version_group.add_argument(
         "--version",
         type=str,
-        help="Specify Kit version label to select and generate files (e.g., '108.0.0', '109.0.1')",
+        help="Specify Kit version label to select and generate files (e.g., '109.0.1', '110.1.1')",
     )
     version_group.add_argument(
         "--default",

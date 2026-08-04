@@ -10,12 +10,12 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
-from pxr import Usd
+from pxr import Usd, UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
@@ -29,16 +29,18 @@ async def main():
     ctx = get_context()
     stage: Usd.Stage = ctx.get_stage()
 
+    # Create CAE anchor
+    UsdGeom.Xform.Define(stage, "/World/CAE")
+
     # 1. Generate the volume for rendering
     dataset_path: str = "/World/StaticMixer/Base/StaticMixer/B1_P3"
-    flow_solution_path: str = "/World/StaticMixer/Base/StaticMixer/Flow_Solution"
     vol_path: str = "/World/CAE/IndeXVolume_B1_P3"
     await execute_command("CreateCaeVizVolume", dataset_path=dataset_path, prim_path=vol_path, type="vdb")
 
     # 2. Set the field for the volume
     vol_prim: Usd.Prim = stage.GetPrimAtPath(vol_path)
     colors_fs_api = cae_viz.FieldSelectionAPI(vol_prim, "colors")
-    colors_fs_api.CreateTargetRel().SetTargets([f"{flow_solution_path}/Eddy_Viscosity"])
+    colors_fs_api.CreateFieldNamesAttr().Set(["Eddy_Viscosity"])
     await wait_for_update()
 
     # 3. Create a Bounding Box

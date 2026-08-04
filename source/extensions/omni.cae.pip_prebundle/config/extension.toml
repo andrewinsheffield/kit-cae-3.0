@@ -22,6 +22,9 @@ repository = "https://github.com/NVIDIA-Omniverse/kit-cae"
 [[python.module]]
 path = "pip_prebundle"
 
+[[python.module]]
+path = "warp_simdata"
+
 [documentation]
 pages = [
     "docs/Overview.md",

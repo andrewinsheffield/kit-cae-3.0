@@ -12,10 +12,14 @@ import uuid
 
 import numpy as np
 import omni.kit.test
+from omni.cae.core.commands import execute_command
+from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import new_stage, wait_for_update
 from omni.cae.viz.colormap_texture_manager import (
     ColormapTextureManager,
     build_colormap_lut,
+    build_opacity_lut,
+    get_dynamic_opacity_url_for_identifier,
     get_dynamic_url_for_identifier,
 )
 from pxr import Sdf, Usd
@@ -23,8 +27,6 @@ from pxr import Sdf, Usd
 
 def _define_colormap(stage: Usd.Stage, path: str) -> Usd.Prim:
     """Define a Colormap prim with CaeVizColormapTextureAPI applied and two control points."""
-    from omni.cae.schema import viz as cae_viz
-
     prim = stage.DefinePrim(path, "Colormap")
     prim.CreateAttribute("rgbaPoints", Sdf.ValueTypeNames.Float4Array).Set([(0.0, 0.0, 1.0, 0.0), (1.0, 0.0, 0.0, 1.0)])
     prim.CreateAttribute("xPoints", Sdf.ValueTypeNames.FloatArray).Set([0.0, 1.0])
@@ -47,11 +49,40 @@ class TestColormapUtilityFunctions(omni.kit.test.AsyncTestCase):
         identifier = "abc123def456"
         self.assertEqual(get_dynamic_url_for_identifier(identifier), "dynamic://cae_colormap_abc123def456")
 
+    async def test_get_dynamic_opacity_url_for_identifier(self):
+        identifier = "abc123def456"
+        self.assertEqual(
+            get_dynamic_opacity_url_for_identifier(identifier),
+            "dynamic://cae_opacitymap_abc123def456",
+        )
+
     async def test_build_colormap_lut_interpolates_points(self):
         lut = build_colormap_lut([(0.0, 0.0, 1.0, 0.0), (1.0, 0.0, 0.0, 1.0)], [0.0, 1.0], resolution=5)
         np.testing.assert_allclose(lut[0], [0.0, 0.0, 1.0, 0.0], atol=1e-6)
         np.testing.assert_allclose(lut[-1], [1.0, 0.0, 0.0, 1.0], atol=1e-6)
         np.testing.assert_allclose(lut[2], [0.5, 0.0, 0.5, 0.5], atol=1e-6)
+
+    async def test_build_opacity_lut_converts_alpha_to_opaque_grayscale(self):
+        color_lut = np.asarray(
+            [
+                [0.0, 0.25, 1.0, 0.0],
+                [0.2, 0.4, 0.6, 0.5],
+                [1.0, 0.75, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+        opacity_lut = build_opacity_lut(color_lut)
+
+        np.testing.assert_allclose(
+            opacity_lut,
+            [
+                [0.0, 0.0, 0.0, 1.0],
+                [0.5, 0.5, 0.5, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+            ],
+            atol=1e-6,
+        )
 
 
 class TestColormapTextureManager(omni.kit.test.AsyncTestCase):
@@ -61,6 +92,22 @@ class TestColormapTextureManager(omni.kit.test.AsyncTestCase):
         manager = ColormapTextureManager.get_instance()
         self.assertIsNotNone(manager, "ColormapTextureManager singleton not available — is the extension loaded?")
         return manager
+
+    async def test_create_colormap_command_authors_a_texture_ready_colormap(self):
+        async with new_stage() as stage:
+            await execute_command("CreateCaeVizColormap", prim_path="/World/CAE/Colormap")
+            prim = stage.GetPrimAtPath("/World/CAE/Colormap")
+
+            self.assertEqual(prim.GetTypeName(), "Colormap")
+            self.assertTrue(prim.HasAPI(cae_viz.ColormapTextureAPI))
+            self.assertTrue(cae_viz.ColormapTextureAPI(prim).GetIdentifierAttr().Get())
+            self.assertEqual(list(prim.GetAttribute("xPoints").Get()), [0.0, 0.5, 1.0])
+            rgba_points = np.asarray(prim.GetAttribute("rgbaPoints").Get())
+            np.testing.assert_allclose(rgba_points[:, 3], [0.0, 0.5, 1.0], atol=1e-6)
+
+            await wait_for_update(0)
+            manager = self._get_manager()
+            self.assertTrue(manager.has_colormap(prim))
 
     async def test_refresh_discovers_colormap_prims(self):
         """Manager should register a texture entry after a Colormap prim with the API is added."""
@@ -74,12 +121,13 @@ class TestColormapTextureManager(omni.kit.test.AsyncTestCase):
             entry = manager.get_entry(prim)
             self.assertIsNotNone(entry)
 
-            from omni.cae.schema import viz as cae_viz
-
             identifier = cae_viz.ColormapTextureAPI(prim).GetIdentifierAttr().Get()
             expected_url = get_dynamic_url_for_identifier(identifier)
+            expected_opacity_url = get_dynamic_opacity_url_for_identifier(identifier)
             self.assertEqual(manager.get_dynamic_url(prim), expected_url)
+            self.assertEqual(manager.get_dynamic_opacity_url(prim), expected_opacity_url)
             self.assertEqual(entry.texture_name, f"cae_colormap_{identifier}")
+            self.assertEqual(entry.opacity_texture_name, f"cae_opacitymap_{identifier}")
 
     async def test_colormap_without_api_not_tracked(self):
         """Manager must not create a texture entry for a Colormap prim without CaeVizColormapTextureAPI."""

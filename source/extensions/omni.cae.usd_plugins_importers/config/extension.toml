@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+[package]
+version = "1.2.0"
+title = "CAE USD Plugins Importers"
+description = "Asset importer extension for file formats provided by omni.cae.usd_plugins (CGNS, EDEM, EnSight, FLASH AMR, Eclipse reservoir formats, NumPy, NanoVDB, OpenFOAM, VTK, Trimesh)."
+category = "CAE"
+readme  = "docs/README.md"
+keywords = ["kit", "cae", "cgns", "edem", "ensight", "flash", "amr", "reservoir", "egrid", "grdecl", "init", "unrst", "numpy", "npz", "npy", "nanovdb", "nvdb", "openfoam", "vtk", "vtkxml", "trimesh", "stl", "ply", "3mf", "importer"]
+changelog = "docs/CHANGELOG.md"
+icon = "data/icon.png"
+
+[dependencies]
+"omni.cae.usd_plugins" = {}
+"omni.client" = {}
+"omni.kit.tool.asset_importer" = {}
+
+[[python.module]]
+name = "omni.cae.usd_plugins_importers"
+
+[documentation]
+pages = [
+    "docs/README.md",
+    "docs/CHANGELOG.md",
+]
+
+[[test]]
+dependencies = [
+    "omni.cae.testing",
+]

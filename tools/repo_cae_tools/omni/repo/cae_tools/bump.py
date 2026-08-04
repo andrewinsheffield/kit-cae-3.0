@@ -15,20 +15,36 @@ import os
 
 import omni.repo.kit_tools.bump
 import omni.repo.man as repo_man
+from packaging.version import Version
 
 
 def bump_version(version, component) -> str:
-    import semver
+    ver = Version(version)
+    if str(ver) != version:
+        raise ValueError(f"Version must use canonical PEP 440 spelling: {version!r}")
 
-    ver = semver.VersionInfo.parse(version)
+    release = ver.release + (0,) * (3 - len(ver.release))
+    major, minor, patch = release[:3]
+
     if component == "prerelease":
-        new_ver = ver.bump_prerelease()
+        base = f"{major}.{minor}.{patch}"
+        if ver.dev is not None:
+            new_ver = Version(f"{base}.dev{ver.dev + 1}")
+        elif ver.pre is not None:
+            phase, number = ver.pre
+            new_ver = Version(f"{base}{phase}{number + 1}")
+        elif ver.post is None:
+            new_ver = Version(f"{base}rc1")
+        else:
+            raise ValueError(f"Cannot prerelease-bump post release {version!r}")
     elif component == "patch":
-        new_ver = ver.bump_patch()
+        new_ver = Version(f"{major}.{minor}.{patch + 1}")
     elif component == "minor":
-        new_ver = ver.bump_minor()
+        new_ver = Version(f"{major}.{minor + 1}.0")
     elif component == "major":
-        new_ver = ver.bump_major()
+        new_ver = Version(f"{major + 1}.0.0")
+    else:
+        raise ValueError(f"Unknown version component {component!r}")
 
     return str(new_ver)
 
@@ -54,10 +70,10 @@ def bump(options, config):
     component = inquirer.select(
         message="Which package version component (X) to bump?",
         choices=[
-            Choice(value="prerelease", name="Prerelease (1.0.0-X)"),
-            Choice(value="patch", name="Patch (1.0.0-X)"),
-            Choice(value="minor", name="Minor (1.0.0-X)"),
-            Choice(value="major", name="Major (1.0.0-X)"),
+            Choice(value="prerelease", name="Prerelease (1.0.0rc1 / 1.1.0.dev0)"),
+            Choice(value="patch", name="Patch (1.0.1)"),
+            Choice(value="minor", name="Minor (1.1.0)"),
+            Choice(value="major", name="Major (2.0.0)"),
         ],
         default=None,
     ).execute()
@@ -69,6 +85,8 @@ def bump(options, config):
 
 
 def setup_repo_tool(parser, config):
+    # Kit app and extension manifests require SemVer, so leave the standard Kit
+    # bump callback in place. The repository package version below uses PEP 440.
     og_bump = omni.repo.kit_tools.bump.setup_repo_tool(parser, config)
 
     def run_repo_tool(options, config):

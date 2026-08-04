@@ -16,7 +16,12 @@ evals/
 │   ├── 05_streamlines.yaml
 │   ├── 06_time_varying_video.yaml
 │   ├── 07_field_statistics.yaml
-│   └── 08_creativity.yaml
+│   ├── 08_creativity.yaml
+│   ├── 09_iso_surface.yaml
+│   ├── 10_geometry_planar_slice.yaml
+│   ├── 11_independent_opacity.yaml
+│   ├── 12_derived_speed.yaml
+│   └── 13_flash_partial_revolution.yaml
 ├── validators/            ← one Kit --exec script per graded eval
 │   ├── validate_01.py
 │   ├── validate_02.py
@@ -135,21 +140,26 @@ You can also use evals manually:
 |---|------|-------|-----------|-----|
 | 01 | Import & Inspect | File import, stage discovery, field enumeration | `StaticMixer.cgns` | `omni.cae.kit` |
 | 02 | Volume Render | Volume creation, field binding, screenshot | `StaticMixer.cgns` | `omni.cae.kit` |
-| 03 | Faces + Colormap | Surface viz, field coloring, screenshot | `multicomb_0_polyhedra.vtu` | `omni.cae_vtk.kit` |
+| 03 | Faces + Colormap | Surface viz, field coloring, screenshot | `multicomb_0_polyhedra.vtu` | `omni.cae.kit` |
 | 04 | Multi-Viz Composition | Multiple viz types, field wiring, NPZ import | `disk_out_ref.npz` | `omni.cae.kit` |
 | 05 | Streamlines | Flow viz, seed geometry, velocity binding | `disk_out_ref.npz` | `omni.cae.kit` |
 | 06 | Time-Varying Video | Time-varying data, camera animation, H.264 MP4 | `hex_timesteps.cgns` | `omni.cae.kit` |
 | 07 | Field Statistics | Programmatic stats query, numeric validation | `StaticMixer.cgns` | `omni.cae.kit` |
 
-### Ungraded Eval (8)
+### Human-Review Evals (8–13)
 
 | # | Name | Tests |
 |---|------|-------|
 | 08 | Creativity | Invent a custom data format, generate data, produce a visually striking video |
+| 09 | Iso Surface | Contour/color separation, in-range iso-value, extracted geometry |
+| 10 | Geometry Planar Slice | Geometry-vs-volume routing, multi-plane mode, transform update |
+| 11 | Independent Opacity | Separate color/opacity fields, opacity LUT/domain, opaque comparison |
+| 12 | Derived Speed | Array Expression ownership/discovery, derived-field visualization |
+| 13 | FLASH Partial Revolution | Direct axisymmetric volume, partial-angle clipping, analytical-path semantics |
 
-Eval 08 is **not graded**. It measures the model's ability to synthesize format
-onboarding, data generation, visualization, and capture into something coherent
-and compelling. Evaluated by human review.
+These evals are not automatically graded. Eval 08 measures broad creative
+synthesis. Evals 09–13 are focused routing checks for post-2.x visualization
+capabilities and include `scoring_notes` for human review.
 
 ## Grading
 
@@ -235,3 +245,6 @@ generation is needed for graded evals.
 1. Create a YAML file in `prompts/` following the schema
 2. Create a validator in `validators/` if graded
 3. Update this README
+
+Prompt-only human-review evals may omit a validator, but must set
+`graded: false` and include concrete `scoring_notes`.

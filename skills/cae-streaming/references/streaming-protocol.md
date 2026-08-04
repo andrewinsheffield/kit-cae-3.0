@@ -146,7 +146,7 @@ connected clients.
 | Field | Direction | Type | Notes |
 |---|---|---|---|
 | `scene_id` | request | string | Canonical key. Replaces any existing entry with the same id. |
-| `entry` | request | object | Full scene record; required keys: `path`, `format`, `prim_path`, `dataset_path`, `default_viz_command`. Optional: `label`, `description`, `default_viz`, `default_viz_kwargs`, `color_field`, `schema_type`. |
+| `entry` | request | object | Full scene record; required keys: `path`, `format`, `prim_path`, `dataset_path`, `default_viz_command`. Optional: `label`, `description`, `default_viz`, `default_viz_kwargs`, `color_field`, `schema`, `import_args`. |
 | `ok` | response | bool | Always present. |
 | `scene_id` | response | string | Echoed. |
 | `scenes` | response | `SceneSummary[]` | Updated full registry. |

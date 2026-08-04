@@ -9,7 +9,7 @@
 # its affiliates is strictly prohibited.
 
 [package]
-version = "2.0.0"
+version = "2.6.0"
 title = "CAE Property Widget Bundle"
 description="Property widget customizations for CAE"
 category = "internal"
@@ -26,9 +26,12 @@ preview_image = "data/preview.png"
 "omni.kit.window.property" = {}
 "omni.kit.property.usd" = {}
 "omni.kit.property.bundle" = {}
+"omni.timeline" = {}
 
+"omni.cae.core" = {}
 "omni.cae.schema" = {}
-"omni.cae.data" = {}
+"omni.cae.simdata" = {}
+"omni.cae.viz" = {}
 
 # Main python module this extension provides, it will be publicly available as "import omni.example.hello".
 [[python.module]]

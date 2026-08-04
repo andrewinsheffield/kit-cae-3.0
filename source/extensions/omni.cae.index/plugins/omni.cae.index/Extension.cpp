@@ -19,7 +19,6 @@
 #include <nv/index/app/application_layer/iimporter_manager.h>
 #include <nv/index/app/application_layer/iinterface_factory_manager.h>
 #include <nv/index/iindex.h>
-#include <omni/cae/data/IDataDelegateInterface.h>
 #include <omni/ext/IExt.h>
 #include <rtx/index/IndexInstance.h>
 
@@ -28,12 +27,11 @@
 #define EXTENSION_NAME "omni.cae.index.plugin"
 
 using namespace carb;
-CARB_PLUGIN_IMPL_DEPS(omni::cae::data::IDataDelegateInterface, rtx::index::IndexInstance, carb::logging::ILogging);
+CARB_PLUGIN_IMPL_DEPS(rtx::index::IndexInstance, carb::logging::ILogging);
 
 class Extension : public omni::ext::IExt
 {
     std::string m_extensionId;
-    omni::cae::data::IDataDelegateInterface* m_idataDelegate = nullptr;
     nv::index::IIndex* m_iindex = nullptr;
     nv::index::app::IApplication_layer* m_application_layer = nullptr;
     mi::base::Handle<nv::index::app::IImporter_manager> m_importer_manager;
@@ -45,7 +43,6 @@ public:
     void onStartup(const char* extId) override
     {
         this->m_extensionId = extId;
-        m_idataDelegate = carb::getFramework()->acquireInterface<omni::cae::data::IDataDelegateInterface>();
         auto* ifaceIndex = carb::getFramework()->acquireInterface<rtx::index::IndexInstance>();
         m_iindex = ifaceIndex->getInterface<nv::index::IIndex>();
         m_application_layer = ifaceIndex->getInterface<nv::index::app::IApplication_layer>();

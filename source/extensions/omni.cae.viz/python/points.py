@@ -10,19 +10,19 @@
 
 from logging import getLogger
 
-import dav
 import numpy as np
-import omni.cae.dav as cae_dav
+import omni.cae.simdata as cae_simdata
 import warp as wp
-from dav.data_models.custom import point_cloud as dav_point_cloud
-from dav.operators import point_cell_counts as dav_point_cell_counts
-from dav.operators import point_field as dav_point_field
-from dav.operators import point_splats as dav_point_splats
-from omni.cae.data import array_utils, cache, progress, usd_utils
+import warp_simdata as simdata
+from omni.cae.core import array_utils, cache, progress, usd_utils
 from omni.cae.schema import viz as cae_viz
 from pxr import Usd
 from usdrt import UsdGeom as UsdGeomRT
 from usdrt import Vt as VtRT
+from warp_simdata.data_models.custom import point_cloud as simdata_point_cloud
+from warp_simdata.operators import node_element_counts as simdata_node_element_counts
+from warp_simdata.operators import node_field as simdata_node_field
+from warp_simdata.operators import node_splats as simdata_node_splats
 
 from . import utils as viz_utils
 from .execution_context import ExecutionContext
@@ -31,9 +31,9 @@ from .operator import operator
 logger = getLogger(__name__)
 
 
-def _subset(dataset: dav.Dataset, max_points: int, chosen_point_idxs: np.ndarray = None) -> dav.Dataset:
+def _subset(dataset: simdata.Dataset, max_points: int, chosen_point_idxs: np.ndarray = None) -> simdata.Dataset:
     # TODO: this can be optimized
-    nb_points_in = dataset.get_num_points() if chosen_point_idxs is None else chosen_point_idxs.shape[0]
+    nb_points_in = dataset.get_num_nodes() if chosen_point_idxs is None else chosen_point_idxs.shape[0]
     if max_points > 0 and nb_points_in > max_points:
         logger.warning(f"Subsetting dataset to {max_points} points")
         stride = int(np.ceil(nb_points_in / max_points))
@@ -47,46 +47,48 @@ def _subset(dataset: dav.Dataset, max_points: int, chosen_point_idxs: np.ndarray
         # nothing to mask out; just return the dataset
         return dataset
 
-    assert dataset.data_model == dav_point_cloud.DataModel
+    assert dataset.data_model == simdata_point_cloud.DataModel
     pc_handle = dataset.handle
     pc_handle.points = wp.array(pc_handle.points.numpy()[mask], dtype=wp.vec3f, device="cpu")
     for field_name in dataset.get_field_names():
         field = dataset.get_field(field_name)
-        if field.association == dav.AssociationType.CELL:
+        if field.association == simdata.AssociationType.ELEMENT:
             logger.warning(f"Skipping cell-centered field: {field_name}")
             continue
-        array = array_utils.as_warp_array(cae_dav.fetch_data(dataset, field_name)).numpy()
+        array = array_utils.as_warp_array(cae_simdata.fetch_data(dataset, field_name)).numpy()
         array = array[mask]
         array = wp.array(array, dtype=wp.float32, device="cpu").to(dataset.device)
-        dataset.add_field(field_name, dav.Field.from_array(array, dav.AssociationType.VERTEX), warn_if_exists=False)
+        dataset.add_field(
+            field_name, simdata.Field.from_array(array, simdata.AssociationType.NODE), warn_if_exists=False
+        )
     return dataset
 
 
-def _compute_points(source_dataset: dav.Dataset, max_points: int, use_cell_points: bool) -> dav.Dataset:
-    with progress.ProgressContext("Executing DAV [point_splats]"):
-        points_dataset = dav_point_splats.compute(source_dataset, radius=0.0, sharpness=1.0)
+def _compute_points(source_dataset: simdata.Dataset, max_points: int, use_cell_points: bool) -> simdata.Dataset:
+    with progress.ProgressContext("Executing SimData [node_splats]"):
+        points_dataset = simdata_node_splats.compute(source_dataset, radius=0.0, sharpness=1.0)
 
     for field_name in source_dataset.get_field_names():
         # pass fields, converting cell-to-point data, if needed
-        with progress.ProgressContext("Executing DAV [point_field]"):
-            tmp_dataset = dav_point_field.compute(source_dataset, field_name, output_field_name="_point_field")
-        points_dataset.add_field(field_name, tmp_dataset.get_field("_point_field"))
+        with progress.ProgressContext("Executing SimData [node_field]"):
+            tmp_dataset = simdata_node_field.compute(source_dataset, field_name, output_field_name="_node_field")
+        points_dataset.add_field(field_name, tmp_dataset.get_field("_node_field"))
 
     if not use_cell_points:
         return _subset(points_dataset, max_points)
 
-    with progress.ProgressContext("Executing DAV [point_cell_counts]"):
-        point_cell_counts_ds = dav_point_cell_counts.compute(source_dataset, field_name="counts")
-    countds_field = point_cell_counts_ds.get_field("counts")
+    with progress.ProgressContext("Executing SimData [node_element_counts]"):
+        node_element_counts_ds = simdata_node_element_counts.compute(source_dataset, field_name="counts")
+    countds_field = node_element_counts_ds.get_field("counts")
     range = countds_field.get_range()
     if range[0] > 0:
         # all points are "chosen"
         return _subset(points_dataset, max_points)
     else:
-        point_cell_counts_np = wp.array(cae_dav.fetch_data(point_cell_counts_ds, "counts"), copy=False).numpy()
+        node_element_counts_np = wp.array(cae_simdata.fetch_data(node_element_counts_ds, "counts"), copy=False).numpy()
 
         # get indices for points with non-zero cell counts
-        chosen_point_idxs = np.where(point_cell_counts_np > 0)[0]
+        chosen_point_idxs = np.where(node_element_counts_np > 0)[0]
         return _subset(points_dataset, max_points, chosen_point_idxs)
 
 
@@ -115,7 +117,7 @@ class Points:
         max_points = points_api.GetMaxCountAttr().Get()
         use_cell_points = points_api.GetUseCellPointsAttr().Get()
 
-        if source_dataset.get_num_cells() == 0 and use_cell_points:
+        if source_dataset.get_num_elems() == 0 and use_cell_points:
             logger.error(
                 f"Dataset has no cells, but use_cell_points is True. Try setting {points_api.GetUseCellPointsAttr().GetPath()} to False."
             )
@@ -144,7 +146,7 @@ class Points:
             factor = (context.raw_timecode.GetValue() - context.timecode.GetValue()) / (
                 context.next_time_code.GetValue() - context.timecode.GetValue()
             )
-            points_dataset = cae_dav.lerp_dataset(
+            points_dataset = cae_simdata.lerp_dataset(
                 points_dataset,
                 next_points_dataset,
                 factor,
@@ -156,7 +158,7 @@ class Points:
         await self.populate_points(prim, points_dataset, width, context)
 
     async def populate_points(
-        self, prim: Usd.Prim, points_dataset: dav.Dataset, width: float, context: ExecutionContext
+        self, prim: Usd.Prim, points_dataset: simdata.Dataset, width: float, context: ExecutionContext
     ):
         prim_rt = UsdGeomRT.Points(usd_utils.get_prim_rt(prim))
         viz_utils.set_array_attribute(prim_rt.CreatePointsAttr(), points_dataset.handle.points)
@@ -189,7 +191,7 @@ class Glyphs:
         use_cell_points = glyphs_api.GetUseCellPointsAttr().Get(context.timecode)
         default_scale = glyphs_api.GetScaleAttr().Get(context.timecode)
 
-        if source_dataset.get_num_cells() == 0 and use_cell_points:
+        if source_dataset.get_num_elems() == 0 and use_cell_points:
             logger.error(
                 f"Dataset has no cells, but use_cell_points is True. Try setting {glyphs_api.GetUseCellPointsAttr().GetPath()} to False."
             )
@@ -218,7 +220,7 @@ class Glyphs:
             factor = (context.raw_timecode.GetValue() - context.timecode.GetValue()) / (
                 context.next_time_code.GetValue() - context.timecode.GetValue()
             )
-            points_dataset = cae_dav.lerp_dataset(
+            points_dataset = cae_simdata.lerp_dataset(
                 points_dataset,
                 next_points_dataset,
                 factor,
@@ -233,7 +235,7 @@ class Glyphs:
     async def populate_glyphs(
         self,
         prim: Usd.Prim,
-        points_dataset: dav.Dataset,
+        points_dataset: simdata.Dataset,
         orientations_mode: str,
         default_scale: float,
         context: ExecutionContext,
@@ -241,11 +243,11 @@ class Glyphs:
         prim_rt = UsdGeomRT.PointInstancer(usd_utils.get_prim_rt(prim))
         viz_utils.set_array_attribute(prim_rt.CreatePositionsAttr(), points_dataset.handle.points)
         viz_utils.set_array_attribute(
-            prim_rt.CreateProtoIndicesAttr(), np.zeros([points_dataset.get_num_points(), 1], dtype=np.int32)
+            prim_rt.CreateProtoIndicesAttr(), np.zeros([points_dataset.get_num_nodes(), 1], dtype=np.int32)
         )
 
         if points_dataset.has_field("scales"):
-            f_scales = cae_dav.fetch_data(points_dataset, "scales")
+            f_scales = cae_simdata.fetch_data(points_dataset, "scales")
 
             if f_scales.ndim > 2 or (f_scales.ndim == 2 and f_scales.shape[1] not in [1, 3]):
                 raise ValueError(f"Invalid scales shape {f_scales.shape}")
@@ -261,15 +263,15 @@ class Glyphs:
                     wp.array(f_scales, copy=False, device=wp_array.device),
                     out=wp_array,
                 )
-                f_scales = array_utils.IFieldArray.from_array(wp_array)
+                f_scales = wp_array
 
             viz_utils.set_array_attribute(prim_rt.CreateScalesAttr(), f_scales)
         else:
-            np_scales = np.full([points_dataset.get_num_points(), 3], default_scale, dtype=np.float32)
+            np_scales = np.full([points_dataset.get_num_nodes(), 3], default_scale, dtype=np.float32)
             viz_utils.set_array_attribute(prim_rt.CreateScalesAttr(), np_scales)
 
         if points_dataset.has_field("orientations"):
-            f_orientations = cae_dav.fetch_data(points_dataset, "orientations")
+            f_orientations = cae_simdata.fetch_data(points_dataset, "orientations")
             if orientations_mode == "quaternion":
                 if f_orientations.ndim != 2 or f_orientations.shape[1] != 4:
                     raise ValueError(f"Invalid orientations shape {f_orientations.shape}")

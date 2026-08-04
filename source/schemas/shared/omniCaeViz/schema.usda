@@ -194,16 +194,60 @@ class "CaeVizDatasetSelectionAPI" (
         string className = "DatasetSelectionAPI"
         token propertyNamespacePrefix = "cae:viz:dataset_selection"
     }
-    doc = """Multiple-apply API schema for choosing a CaeDataSet as input for an operator.
+    doc = """Multiple-apply API schema for choosing a scientific dataset as input for an operator.
     The instance name indicates the dataset's role to the operator. For example, an operator
     may use the "source" instance name to indicate the dataset to be operated upon."""
 )
 {
     rel target (
-        doc = "Relationship to dataset. Must target a CaeDataSet prim."
+        doc = "Relationship to a scientific dataset prim, normally an OmniSciDataset."
         displayName = "Dataset"
         displayGroup = "Dataset Selection"
     )
+}
+
+class "CaeVizDatasetAxisymmetricRepresentationAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "multipleApply"
+        string className = "DatasetAxisymmetricRepresentationAPI"
+        token propertyNamespacePrefix = "cae:viz:dataset_axisymmetric_representation"
+    }
+    doc = """Multiple-apply API schema configuring an axisymmetric
+    representation of the corresponding CaeVizDatasetSelectionAPI input. Angles
+    are authored in degrees and the instance name identifies the selected dataset."""
+)
+{
+    uniform int angularCells = 32 (
+        doc = "Number of uniform angular cells spanning the selected angle range. Must be at least three."
+        displayGroup = "Dataset Axisymmetric Representation"
+        displayName = "Angular Cells"
+    )
+
+    uniform double minimumAngle = 0.0 (
+        doc = "Minimum revolution angle in degrees. Must be at least zero and less than Maximum Angle."
+        displayGroup = "Dataset Axisymmetric Representation"
+        displayName = "Minimum Angle (degrees)"
+    )
+
+    uniform double maximumAngle = 360.0 (
+        doc = "Maximum revolution angle in degrees. Must exceed Minimum Angle and be at most 360."
+        displayGroup = "Dataset Axisymmetric Representation"
+        displayName = "Maximum Angle (degrees)"
+    )
+}
+
+class "CaeVizDatasetDualAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "multipleApply"
+        string className = "DatasetDualAPI"
+    }
+    doc = """Multiple-apply API schema requesting the dual representation of
+    the corresponding CaeVizDatasetSelectionAPI input. The instance name identifies
+    which selected dataset the representation request applies to."""
+)
+{
 }
 
 class "CaeVizDatasetTransformingAPI" (
@@ -346,6 +390,22 @@ class "CaeVizDatasetGaussianSplattingAPI" (
     )
 }
 
+class "CaeVizDatasetVoronoiPointCloudAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "multipleApply"
+        string className = "DatasetVoronoiPointCloudAPI"
+    }
+    doc = """Multiple-apply API schema for controlling how the dataset is processed
+    as an implicit Voronoi point cloud for direct probing or before voxelization by the operator.
+    When applied, each source point is treated as a Voronoi seed with one logical cell.
+    The instance name helps identify which dataset selection
+    (typically specified by applying CaeVizDatasetSelectionAPI) the
+    Voronoi point-cloud conversion applies to."""
+)
+{
+}
+
 class "CaeVizDatasetTemporalTraitsAPI" (
     inherits = </APISchemaBase>
     customData = {
@@ -398,6 +458,13 @@ class "CaeVizFieldSelectionAPI" (
         doc = """Relationship to field. Can target multiple fields. They are all used according to the "mode" attribute."""
         displayGroup = "Field Selection"
         displayName = "Field(s)"
+    )
+
+    token[] fieldNames (
+        doc = """Field names for dataset types that don't use USD relationships for field selection (e.g. OmniSciDataset).
+        Can specify multiple field names. They are all used according to the "mode" attribute."""
+        displayGroup = "Field Selection"
+        displayName = "Field Name(s)"
     )
 
     uniform token mode = "unchanged" (
@@ -516,6 +583,34 @@ class "CaeVizFacesAPI" (
         displayGroup = "Faces"
         customData = {
             token apiName = "externalOnly"
+        }
+    )
+}
+
+class "CaeVizIsoSurfaceAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "singleApply"
+        string className = "IsoSurfaceAPI"
+        token[] apiSchemaCanOnlyApplyTo = ["UsdGeomMesh"]
+    }
+    doc = """API schema when applied to UsdGeomMesh indicates that the prim
+    represents an iso-surface extracted from the dataset targeted by the
+    'source' instance of CaeVizDatasetSelectionAPI.
+
+    The 'contour' instance of CaeVizFieldSelectionAPI selects the scalar field
+    to contour. Point- and cell-associated fields are supported; cell values are
+    averaged onto points. The 'colors' instance optionally selects a field to
+    interpolate onto and color the generated surface.
+    """
+)
+{
+    uniform float cae:viz:isoSurface:isoValue = 0.0 (
+        doc = "Specifies the scalar value at which to extract the iso-surface."
+        displayName = "Iso Value"
+        displayGroup = "Iso Surface"
+        customData = {
+            token apiName = "isoValue"
         }
     )
 }
@@ -744,6 +839,30 @@ class "CaeVizIndeXVolumeAPI" (
 {
 }
 
+class "CaeVizIndeXAxisymmetricVolumeAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "singleApply"
+        string className = "IndeXAxisymmetricVolumeAPI"
+        token[] apiSchemaCanOnlyApplyTo = ["UsdVolVolume"]
+    }
+    doc = """Experimental single-apply API schema selecting direct axisymmetric
+    NVIDIA IndeX volume rendering. The renderer samples a compact native
+    (radius, axial) lookup and does not materialize revolved geometry or fields.
+    FLASH AMR is the initial supported dataset model."""
+)
+{
+    uniform float cae:viz:indexAxisymmetricVolume:samplingDistanceScale = 1.0 (
+        doc = """Ray sampling distance as a multiple of the finest native cell
+        spacing."""
+        displayName = "Sampling Distance Scale"
+        displayGroup = "IndeX Axisymmetric Volume"
+        customData = {
+            token apiName = "samplingDistanceScale"
+        }
+    )
+}
+
 class "CaeVizPlanarSliceAPI" (
     inherits = </APISchemaBase>
     customData = {
@@ -752,26 +871,16 @@ class "CaeVizPlanarSliceAPI" (
         token[] apiSchemaCanOnlyApplyTo = ["UsdGeomMesh"]
     }
     doc = """Single-apply API schema when applied to UsdGeomMesh indicates that the prim
-    represents a single planar slice extracted from the dataset targeted by the 'source'
-    instance of CaeVizDatasetSelectionAPI. Multiple slices are expressed as sibling UsdGeomMesh
-    prims, each with this API applied, grouped under a common UsdGeomXform."""
+    represents planar surfaces extracted from the dataset targeted by the 'source'
+    instance of CaeVizDatasetSelectionAPI. The prim's translation specifies a point
+    on every plane. In free mode, its transformed local +Y axis specifies the normal."""
 )
 {
-    uniform int2 cae:viz:planarSlice:textureResolution = (512, 512) (
-        doc = """Specifies the resolution (width, height) of the texture generated for this slice."""
-        displayName = "Texture Resolution"
-        displayGroup = "Planar Slice"
-        customData = {
-            token apiName = "textureResolution"
-        }
-    )
     uniform token cae:viz:planarSlice:mode = "free" (
-        doc = """Specifies the slice mode.
-         'free' = single free-moving plane;
-         'x'/'y'/'z' = single axis-aligned plane;
-         'xy'/'xz'/'yz' = two axis-aligned planes;
-         'xyz' = three axis-aligned planes."""
-        displayName = "Mode"
+        doc = """Specifies the plane directions. 'free' uses the prim's transformed local
+        +Y axis. 'x', 'y', and 'z' select one axis-aligned plane; combinations select
+        two or three axis-aligned planes."""
+        displayName = "Direction"
         displayGroup = "Planar Slice"
         allowedTokens = [
             "free",

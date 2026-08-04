@@ -35,7 +35,8 @@ A built Kit-CAE checkout. Validate with the steps in `## Preflight Checklist` be
 1. **Run preflight** — verify each check in `## Preflight Checklist` before any other action.
 2. **Launch Kit-CAE** — pick the right `.kit` file and pass the launch flags from `## Launching Kit-CAE`.
 3. **Run a script** — invoke any helper in `scripts/` with the `run_script` pattern shown in `## Running Scripts` (`./repo.sh launch -n <kit> -- --exec <path/to/script.py> --no-window`).
-4. **Apply the critical rules** — Z-up convention, USDRT-only stage queries, top-level imports — see `## Critical Rules` and `## Z-Up Coordinate System`.
+4. **Apply the critical rules** — Z-up convention, OmniSci stage discovery,
+   and top-level imports — see `## Critical Rules` and `## Z-Up Coordinate System`.
 5. **Reference the API** — detailed call patterns live in `references/kit-cae-api.md`; format-specific stage layout lives in `references/formats.md`.
 
 ## Examples
@@ -60,8 +61,8 @@ Kit-CAE skills inspect and visualize CAE datasets — they do not modify source 
 1. *Kit-CAE repo present?* — look for `repo.sh` at the root
 2. *Built?* — check `_build/linux-x86_64/release/` (or `_build\windows-x86_64\release\`)
    - If missing: `./repo.sh build -r`
-3. *Pip deps installed?* — check `_build/target-deps/pip_prebundle/vtk/`
-   - If missing: `./repo.sh pip_download` (VTK, h5py, lz4)
+3. *Need a legacy delegate or direct Python-VTK workflow?* — if so, run
+   `./repo.sh pip_download` (VTK, h5py, lz4). Native file imports do not need it.
 4. *RTX GPU?* — `nvidia-smi`, need ≥8GB VRAM (16GB+ recommended)
 5. *No other Kit running?* — `pgrep -f "kit.sh\|kit " | head`, kill stale instances first
 6. *Shader cache warm?* — first launch compiles shaders (~2–3 min). Front-load:
@@ -73,8 +74,8 @@ Kit-CAE skills inspect and visualize CAE datasets — they do not modify source 
 
 | Kit file | Use for |
 |----------|---------|
-| `omni.cae_vtk.kit` | VTK formats (.vti/.vtu/.vts/.vtp/.vtk) |
-| `omni.cae.kit` | Everything else (CGNS, EnSight, OpenFOAM, NPZ, EDEM) |
+| `omni.cae.kit` | All native formats, including VTK, CGNS, EnSight, OpenFOAM, NPZ, and EDEM |
+| `omni.cae_vtk.kit` | Legacy workflows that directly import the VTK Python package |
 
 > **For browser-streamed sessions** (long-lived Kit-CAE that a remote client
 > watches and drives), see `skills/cae-streaming/SKILL.md`. That skill ships
@@ -126,7 +127,7 @@ For volume rendering, also add:
 ### Inspect scripts
 
 ```bash
-CAE_INSPECT_FILE=<file> ./repo.sh launch -n omni.cae_vtk.kit -- \
+CAE_INSPECT_FILE=<file> ./repo.sh launch -n omni.cae.kit -- \
     --exec skills/cae-core/scripts/inspect_vtk.py --no-window
 
 CAE_INSPECT_FILE=<file> ./repo.sh launch -n omni.cae.kit -- \
@@ -141,7 +142,7 @@ CAE_STATS_FILE=<file> ./repo.sh launch -n omni.cae.kit -- \
 ```
 
 Outputs JSON between `STATS_BEGIN`/`STATS_END` markers. Optional env vars:
-`CAE_STATS_FORMAT` (force format), `CAE_STATS_FIELDS` (comma-separated prim paths).
+`CAE_STATS_SCHEMA` (NPZ interpretation), `CAE_STATS_FIELDS` (comma-separated field instance names).
 
 ### Script shutdown (MANDATORY)
 
@@ -168,10 +169,10 @@ os._exit(0)
 - Wait *≥600 frames* before first capture; 120+ extra for first capture in session
 - `--no-window` for headless; `--exec` for script execution
 - *Always create a bounding box* before `frame_prims`
-- VTK files → `omni.cae_vtk.kit`; everything else → `omni.cae.kit`
+- Use `omni.cae.kit` for every native file-format plugin
 - CGNS: paths under import root directly; dots/spaces → underscores
-- NPZ `"SIDS Unstructured"` requires field association fix (see `kit-cae-api.md`)
-- Velocity as separate scalars → pass all components to `SetTargets()`
+- Import mesh-like NPZ data with `schema="CGNS"`; no association patch is needed
+- Velocity as separate scalars → pass all component instance names to `fieldNames`
 - `stage.GetPrimAtPath()` never returns None — use `prim.IsValid()`
 - `Gf.Vec2f`/`Gf.Vec3f` require Python `float`, not numpy types
 - *Kit-CAE is Z-up* — orbit in X-Y plane, elevate along Z

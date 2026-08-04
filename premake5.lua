@@ -27,16 +27,19 @@ filter {}
 kit = require("_repo/deps/repo_kit_tools/kit-template/premake5-kit")
 kit.setup_all({ cppdialect = "C++17" })
 
--- Also discover legacy extensions (relocated from source/extensions, not renamed)
-for _, ext in ipairs(os.matchdirs(root.."/source/legacy_extensions/*")) do
-    if os.isfile(ext.."/premake5.lua") then
-        include(ext)
-    end
-end
-
 -- if sources/extensions_nvinternal exists, include extensions under it.
 if os.isdir(root.."/source/extensions_nvinternal") then
   for _, ext in ipairs(os.matchfiles(root.."/source/extensions_nvinternal/**/premake5.lua")) do
+      if os.isfile(ext) then
+          include (ext)
+      end
+  end
+end
+
+-- if source/legacy_extensions exists, include extensions under it. Keep this
+-- optional so the directory can be absent until extensions are retired into it.
+if os.isdir(root.."/source/legacy_extensions") then
+  for _, ext in ipairs(os.matchfiles(root.."/source/legacy_extensions/**/premake5.lua")) do
       if os.isfile(ext) then
           include (ext)
       end

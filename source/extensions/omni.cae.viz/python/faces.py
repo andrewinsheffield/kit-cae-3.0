@@ -12,7 +12,7 @@
 Faces operator for extracting and rendering cell faces from datasets.
 
 This module provides the Faces operator which extracts all cell faces from a volumetric
-dataset using the dav.operators.cell_faces operator and populates a UsdGeomMesh prim
+dataset using the simdata.operators.element_faces operator and populates a UsdGeomMesh prim
 with the resulting surface mesh.
 
 The operator is similar to the Points operator but works with cell faces rather than points.
@@ -21,15 +21,16 @@ The operator is similar to the Points operator but works with cell faces rather 
 from logging import getLogger
 from typing import Any
 
-import dav
-import omni.cae.dav as cae_dav
-from dav.data_models.custom import surface_mesh as dav_surface_mesh
-from dav.operators import cell_faces as dav_cell_faces
-from omni.cae.data import cache, progress, usd_utils
+import omni.cae.simdata as cae_simdata
+import warp_simdata as simdata
+from omni.cae.core import cache, progress, usd_utils
 from omni.cae.schema import viz as cae_viz
 from pxr import Usd
+from usdrt import Usd as UsdRT
 from usdrt import UsdGeom as UsdGeomRT
 from usdrt import Vt as VtRT
+from warp_simdata.data_models.custom import surface_mesh as simdata_surface_mesh
+from warp_simdata.operators import element_faces as simdata_element_faces
 
 from . import utils as viz_utils
 from .execution_context import ExecutionContext
@@ -37,6 +38,35 @@ from .operator import operator
 
 logger = getLogger(__name__)
 import warp as wp
+
+
+async def populate_surface_mesh(
+    prim: Usd.Prim,
+    surface_dataset: simdata.Dataset,
+    update_points_attr: bool = True,
+    update_faces_attrs: bool = True,
+    update_primvars: bool = True,
+    exclude_fields: set[str] | None = None,
+    output_prim_rt: UsdRT.Prim | None = None,
+):
+    """Populate a UsdGeomMesh from a SimData surface-mesh dataset."""
+    output_prim_rt = usd_utils.get_prim_rt(prim) if output_prim_rt is None else output_prim_rt
+    prim_rt = UsdGeomRT.Mesh(output_prim_rt)
+
+    if update_points_attr:
+        viz_utils.set_array_attribute(prim_rt.CreatePointsAttr(), surface_dataset.handle.points)
+
+    if update_faces_attrs:
+        viz_utils.set_array_attribute(prim_rt.CreateFaceVertexCountsAttr(), surface_dataset.handle.face_vertex_counts)
+        viz_utils.set_array_attribute(prim_rt.CreateFaceVertexIndicesAttr(), surface_dataset.handle.face_vertex_indices)
+
+    if update_primvars:
+        viz_utils.process_field_selection_apis(
+            prim,
+            surface_dataset,
+            exclude_fields=exclude_fields,
+            output_prim_rt=output_prim_rt,
+        )
 
 
 @operator()
@@ -74,22 +104,54 @@ class Faces:
             update_faces_attrs = True
             update_points_attr = True
 
+        logger.debug(
+            "[cae.viz.faces][time] exec prim=%s reason=%s time=%s raw=%s next=%s device=%s "
+            "source_model=%s external_only=%s update_points=%s update_faces=%s",
+            prim.GetPath(),
+            context.reason.value,
+            context.timecode,
+            context.raw_timecode,
+            context.next_time_code,
+            device,
+            getattr(source_dataset, "data_model", None),
+            external_only,
+            update_points_attr,
+            update_faces_attrs,
+        )
+
         # Extract cell faces to create a surface mesh (if needed)
         cache_key = f"omni.cae.viz.faces.Faces:mesh:{prim.GetPath()}"
 
         # if updates are not needed, check if we have the faces data cached already and skip recomputation if so
-        faces_dataset: dav.Dataset | None = None
+        faces_dataset: simdata.Dataset | None = None
         if not (update_faces_attrs or update_points_attr):
             # we use earliest timecode on purpose.
             faces_dataset = cache.get(cache_key, timeCode=Usd.TimeCode.EarliestTime())
+            logger.debug(
+                "[cae.viz.faces][time] static-mesh-cache prim=%s hit=%s key=%s",
+                prim.GetPath(),
+                faces_dataset is not None,
+                cache_key,
+            )
 
         if faces_dataset is None:
-            if source_dataset.data_model == dav_surface_mesh.DataModel:
+            if source_dataset.data_model == simdata_surface_mesh.DataModel:
+                logger.debug(
+                    "[cae.viz.faces][time] using source surface mesh prim=%s time=%s",
+                    prim.GetPath(),
+                    context.timecode,
+                )
                 faces_dataset = source_dataset
             else:
-                # logger.info(f"computing mesh (w/o fields)")
-                with progress.ProgressContext("Executing DAV [cell_faces]"):
-                    faces_dataset = dav_cell_faces.compute(source_dataset, external_only=external_only)
+                logger.info(
+                    "[cae.viz.faces][time] computing element_faces prim=%s time=%s raw=%s external_only=%s",
+                    prim.GetPath(),
+                    context.timecode,
+                    context.raw_timecode,
+                    external_only,
+                )
+                with progress.ProgressContext("Executing SimData [element_faces]"):
+                    faces_dataset = simdata_element_faces.compute(source_dataset, external_only=external_only)
             # we use earliest timecode on purpose.
             cache.put_ex(
                 cache_key,
@@ -97,9 +159,15 @@ class Faces:
                 prims=[cache.PrimWatch(prim, on="resync")],
                 timeCode=Usd.TimeCode.EarliestTime(),
             )
+        else:
+            logger.debug(
+                "[cae.viz.faces][time] reusing cached surface mesh prim=%s time=%s",
+                prim.GetPath(),
+                context.timecode,
+            )
 
-        faces_dataset = cae_dav.pass_fields(
-            source_dataset, faces_dataset.shallow_copy(), exclude_fields={"cell_idx", "point_idx"}
+        faces_dataset = cae_simdata.pass_fields(
+            source_dataset, faces_dataset.shallow_copy(), exclude_fields={"element_idx", "node_idx"}
         )
 
         # Process rescale range APIs which depend on input dataset.
@@ -117,31 +185,19 @@ class Faces:
     async def populate_mesh(
         self,
         prim: Usd.Prim,
-        faces_dataset: dav.Dataset,
+        faces_dataset: simdata.Dataset,
         update_points_attr: bool,
         update_faces_attrs: bool,
         update_primvars: bool,
     ):
-        # Get the UsdGeomMesh prim
-        prim_rt = UsdGeomRT.Mesh(usd_utils.get_prim_rt(prim))
-
-        if update_points_attr:
-            # Set mesh geometry
-            viz_utils.set_array_attribute(prim_rt.CreatePointsAttr(), faces_dataset.handle.points)
-
-        if update_faces_attrs:
-            # Set face vertex counts
-            viz_utils.set_array_attribute(prim_rt.CreateFaceVertexCountsAttr(), faces_dataset.handle.face_vertex_counts)
-
-        if update_faces_attrs:
-            # Set face vertex indices
-            viz_utils.set_array_attribute(
-                prim_rt.CreateFaceVertexIndicesAttr(), faces_dataset.handle.face_vertex_indices
-            )
-
-        if update_primvars:
-            # Process field selections and primvars
-            viz_utils.process_field_selection_apis(prim, faces_dataset, exclude_fields={"cell_idx", "point_idx"})
+        await populate_surface_mesh(
+            prim,
+            faces_dataset,
+            update_points_attr,
+            update_faces_attrs,
+            update_primvars,
+            exclude_fields={"element_idx", "node_idx"},
+        )
 
 
 @operator(supports_temporal=True, tick_on_time_change=True)
@@ -190,16 +246,37 @@ class FacesWithTemporalInterpolation(Faces):
     async def on_time_changed(self, prim: Usd.Prim, device: str, context: ExecutionContext):
         cache_key = f"omni.cae.viz.faces.FacesWithTemporalInterpolation:{prim.GetPath()}"
         faces_dataset = cache.get(cache_key, timeCode=context.timecode)
+        logger.debug(
+            "[cae.viz.faces][time] tick prim=%s time=%s raw=%s next=%s current_cache_hit=%s",
+            prim.GetPath(),
+            context.timecode,
+            context.raw_timecode,
+            context.next_time_code,
+            faces_dataset is not None,
+        )
         if faces_dataset is None:
             return
         if context.next_time_code and context.next_time_code != context.timecode:
             next_faces_dataset = cache.get(cache_key, timeCode=context.next_time_code)
+            logger.debug(
+                "[cae.viz.faces][time] tick-next prim=%s next=%s next_cache_hit=%s",
+                prim.GetPath(),
+                context.next_time_code,
+                next_faces_dataset is not None,
+            )
             if next_faces_dataset is None:
                 return
             factor = (context.raw_timecode.GetValue() - context.timecode.GetValue()) / (
                 context.next_time_code.GetValue() - context.timecode.GetValue()
             )
-            faces_dataset = cae_dav.lerp_dataset(
+            logger.debug(
+                "[cae.viz.faces][time] interpolating prim=%s time=%s next=%s factor=%s",
+                prim.GetPath(),
+                context.timecode,
+                context.next_time_code,
+                factor,
+            )
+            faces_dataset = cae_simdata.lerp_dataset(
                 faces_dataset,
                 next_faces_dataset,
                 factor,

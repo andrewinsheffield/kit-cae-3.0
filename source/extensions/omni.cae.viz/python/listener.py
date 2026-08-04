@@ -21,6 +21,7 @@ import asyncio
 import functools
 import logging
 import threading
+import weakref
 
 import carb.settings
 import omni.kit.app
@@ -73,9 +74,11 @@ class Listener:
 
     PAUSE_AFTER_MAX_UPDATES = 1
     _sync_lock = asyncio.Lock()
+    _instances = weakref.WeakSet()
 
     def __init__(self):
         """Initialize the listener and subscribe to stage events."""
+        Listener._instances.add(self)
         self._controller: Controller = None
         self._sync_task: asyncio.Task = None
         self._update_counter: int = 0
@@ -96,6 +99,28 @@ class Listener:
 
         logger.info("Listener initialized and subscribed to stage events")
 
+    @classmethod
+    async def wait_for_sync_idle(cls, max_updates: int = 100) -> bool:
+        """Wait until no CAE viz sync task is active.
+
+        Tests close stages aggressively.  Waiting for the listener to become
+        idle avoids tearing down USD layers while an operator is still resolving
+        lazy heavy-data attributes on another thread.
+        """
+        app = omni.kit.app.get_app()
+        for _ in range(max_updates):
+            active_task = any(
+                listener._sync_task is not None and not listener._sync_task.done() for listener in list(cls._instances)
+            )
+            if not active_task and not cls._sync_lock.locked():
+                return True
+
+            await app.next_update_async()
+            await asyncio.sleep(0.01)
+
+        logger.warning("Timed out waiting for CAE viz sync to become idle before stage teardown")
+        return False
+
     def __del__(self):
         """Cleanup resources."""
         if self._sync_task is not None:
@@ -110,6 +135,7 @@ class Listener:
             self._stage_subscription = None
 
         if self._controller:
+            self._controller.close()
             del self._controller
             self._controller = None
 
@@ -168,6 +194,8 @@ class Listener:
         logger.info("Stage attached: ID=%s, metersPerUnit=%s", stageId, metersPerUnit)
 
         try:
+            if self._controller:
+                self._controller.close()
             self._controller = Controller(stageId)
             self._update_counter = 0
             logger.info("Controller created for stage")
@@ -179,7 +207,12 @@ class Listener:
         """Called when the stage is detached."""
         logger.info("Stage detached")
 
+        if self._sync_task is not None and not self._sync_task.done():
+            self._sync_task.cancel()
+            self._sync_task = None
+
         if self._controller:
+            self._controller.close()
             del self._controller
             self._controller = None
 

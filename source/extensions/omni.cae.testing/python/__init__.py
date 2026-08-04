@@ -14,6 +14,7 @@ __all__ = [
     "get_test_stage_path",
     "get_vtrt_array_as_numpy",
     "wait_for_update",
+    "wait_for_rtx_renderer_ready",
     "new_stage",
     "frame_prims",
 ]
@@ -23,7 +24,6 @@ import pathlib
 from logging import getLogger
 
 import numpy as np
-import warp as wp
 from omni.usd import get_context
 
 logger = getLogger(__name__)
@@ -70,11 +70,13 @@ def get_vtrt_array_as_numpy(rt_attr) -> np.ndarray:
     """
     if not rt_attr.IsValid():
         raise ValueError(f"Attribute is not valid")
-    if rt_attr.IsGpuDataValid():
-        return wp.array(rt_attr.Get()).numpy()
-    elif rt_attr.IsCpuDataValid():
-        rt_attr.SyncDataToGpu()
-        return wp.array(rt_attr.Get()).numpy()
+
+    # Tests read Fabric data for assertions; prefer the CPU copy and avoid
+    # forcing a GPU sync that can race the renderer on teardown-heavy test runs.
+    if not rt_attr.IsCpuDataValid() and rt_attr.IsGpuDataValid():
+        rt_attr.SyncDataToCpu()
+    if rt_attr.IsCpuDataValid():
+        return np.array(rt_attr.Get(), copy=True)
 
 
 async def wait_for_update(cycles: int = 10):
@@ -100,6 +102,69 @@ async def wait_for_update(cycles: int = 10):
             await asyncio.sleep(0.01)
 
 
+async def wait_for_rtx_renderer_ready(timeout: float = 120.0, settle_cycles: int = 2):
+    """
+    Wait until RTX can be used by headless tests.
+
+    This deliberately avoids viewport frame events: bundle tests run with
+    --no-window, so there may never be a viewport NEW_FRAME signal.
+    """
+    import time
+
+    import omni.kit.app
+    import omni.usd
+
+    app = omni.kit.app.get_app()
+    deadline = time.monotonic() + timeout
+
+    async def wait_for_next_update(message: str):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(message)
+        await app.next_update_async()
+
+    while not app.is_app_ready():
+        await wait_for_next_update("Timed out waiting for Kit app readiness before RTX setup.")
+
+    ext_manager = app.get_extension_manager()
+    while not ext_manager.is_extension_enabled("omni.hydra.rtx"):
+        await wait_for_next_update("Timed out waiting for omni.hydra.rtx to be enabled.")
+
+    try:
+        import omni.mdl.neuraylib
+    except ImportError:
+        logger.debug("omni.mdl.neuraylib is not available while waiting for RTX readiness.", exc_info=True)
+    else:
+        omni.mdl.neuraylib.ensure_running()
+
+    usd_context = omni.usd.get_context()
+    last_attach_error = None
+
+    def is_rtx_attached():
+        return "rtx" in usd_context.get_attached_hydra_engine_names()
+
+    create_requested = False
+    invalid_uid = getattr(omni.usd, "HydraEngineInvalidUniqueId", None)
+
+    while not is_rtx_attached():
+        if not create_requested:
+            try:
+                engine_uid = omni.usd.create_hydra_engine("rtx", usd_context)
+                create_requested = invalid_uid is None or engine_uid != invalid_uid
+            except Exception as exc:
+                last_attach_error = exc
+                logger.debug("RTX Hydra engine is not attachable yet.", exc_info=True)
+
+        if is_rtx_attached():
+            break
+
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Timed out waiting for the RTX Hydra engine to attach.") from last_attach_error
+        await app.next_update_async()
+
+    for _ in range(settle_cycles):
+        await app.next_update_async()
+
+
 async def frame_prims(prim_paths: list[str], zoom: float = 1.0):
     """
     Frame the camera on the specified prims.
@@ -112,7 +177,7 @@ async def frame_prims(prim_paths: list[str], zoom: float = 1.0):
         Zoom factor, by default 1.0
     """
     from carb.settings import get_settings
-    from omni.cae.data.commands import execute_command
+    from omni.cae.core.commands import execute_command
     from omni.kit.viewport.utility import get_active_viewport
 
     settings = get_settings()
@@ -156,5 +221,13 @@ class new_stage:
         return self.usd_context.get_stage()
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            from omni.cae.viz.listener import Listener
+        except Exception:
+            Listener = None
+
+        if Listener is not None:
+            await Listener.wait_for_sync_idle()
         await self.usd_context.close_stage_async()
+        await wait_for_update(10)
         return False

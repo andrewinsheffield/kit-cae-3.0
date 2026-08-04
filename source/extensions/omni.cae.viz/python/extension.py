@@ -9,7 +9,7 @@
 # its affiliates is strictly prohibited.
 
 """
-Extension that provides CAE visualization algorithms and utilities.
+Extension that provides CAE visualization operators and utilities.
 """
 
 import os
@@ -21,7 +21,17 @@ from omni.client.utils import make_file_url_if_possible
 from omni.kit.app import get_app
 from omni.kit.commands import register_all_commands_in_module, unregister_module_commands
 
-from . import create_commands, faces, flow_emitters, index_volume, points, slice, streamlines
+from . import (
+    create_commands,
+    faces,
+    flow_emitters,
+    index_axisymmetric_volume,
+    index_volume,
+    iso_surface,
+    points,
+    slice,
+    streamlines,
+)
 from .colormap_texture_manager import ColormapTextureManager
 from .listener import Listener
 from .operator import register_module_operators, unregister_module_operators
@@ -63,9 +73,11 @@ class Extension(omni.ext.IExt):
 
         # Import and register all operator modules
         operator_count = register_module_operators(streamlines)
+        operator_count += register_module_operators(index_axisymmetric_volume)
         operator_count += register_module_operators(index_volume)
         operator_count += register_module_operators(points)
         operator_count += register_module_operators(faces)
+        operator_count += register_module_operators(iso_surface)
         operator_count += register_module_operators(flow_emitters)
         operator_count += register_module_operators(slice)
         logger.info(f"Registered {operator_count} operators")
@@ -104,9 +116,11 @@ class Extension(omni.ext.IExt):
 
         # Unregister all operators
         operator_count = unregister_module_operators(streamlines)
+        operator_count += unregister_module_operators(index_axisymmetric_volume)
         operator_count += unregister_module_operators(index_volume)
         operator_count += unregister_module_operators(points)
         operator_count += unregister_module_operators(faces)
+        operator_count += unregister_module_operators(iso_surface)
         operator_count += unregister_module_operators(flow_emitters)
         operator_count += unregister_module_operators(slice)
         logger.info(f"Unregistered {operator_count} operators")

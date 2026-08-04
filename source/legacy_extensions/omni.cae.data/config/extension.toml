@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+[package]
+title = "Omni CAE Data (Legacy)"
+version = "3.0.0"  # Semantic Versioning is used: https://semver.org/
+description = "Deprecated compatibility extension for the CAE Data Delegate API and legacy CaeFieldArray loading."
+category = "internal"  # How to categorize this in the Extension Manager
+changelog = "docs/CHANGELOG.md"
+icon = "data/icon.png"  # Icon to show in the Extension Manager
+keywords = ["kit", "example", "extension"]  # Search keywords for the Extension Manager
+readme = "docs/README.md" # Path (relative to the root) or content of readme markdown file for UI
+repository = "https://github.com/NVIDIA-Omniverse/kit-cae"  # URL of the extension source repository
+
+
+[dependencies]
+"omni.cae.core" = {}
+"omni.cae.schema" = {}
+"omni.usd" = {}
+"omni.usd.core" = {}
+"omni.usd.libs" = {}
+"omni.kit.pip_archive" = {}
+"omni.client" = {}
+"omni.client.lib" = {}
+
+[settings]
+# Cache mode: controls when field arrays are cached
+# Options: "disabled" (no caching), "always" (cache all fields), "static-fields" (cache only non-time-varying fields)
+persistent.exts."omni.cae.data".cacheMode = "always"
+
+# When enabled, converts all 64-bit field arrays to corresponding 32-bit type
+persistent.exts."omni.cae.data".downConvert64Bit = true
+
+[[python.module]]
+name = "omni.cae.data"
+
+[[native.plugin]]
+path = "bin/*.plugin"
+recursive = false
+
+[documentation]
+pages = [
+    "docs/Overview.md",
+    "docs/CHANGELOG.md",
+]
+
+cpp_api = [
+    "../../../include/omni/cae/data/DataDelegateUtils.h",
+    "../../../include/omni/cae/data/DataDelegateUtilsIncludes.h",
+    "../../../include/omni/cae/data/IDataDelegate.h",
+    "../../../include/omni/cae/data/IDataDelegateIncludes.h",
+    "../../../include/omni/cae/data/IDataDelegateInterface.h",
+    "../../../include/omni/cae/data/IDataDelegateRegistry.h",
+    "../../../include/omni/cae/data/IFieldArray.h",
+    "../../../include/omni/cae/data/IFieldArrayUtils.h",
+    "../../../include/omni/cae/data/Types.h",
+]
+
+[[test]]
+dependencies = [
+    "omni.cae.testing",
+]
+
+args =[
+]

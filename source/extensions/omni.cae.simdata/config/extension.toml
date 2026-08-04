@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+[package]
+title = "CAE SimData"
+version = "1.9.0"
+description = "Extension that provides Warp SimData processing operators for USD-plugin backed datasets."
+category = "CAE"
+changelog = "docs/CHANGELOG.md"
+icon = "data/icon.png"
+keywords = ["kit", "cae", "simdata", "warp-simdata"]
+readme  = "docs/README.md"
+repository = "https://github.com/NVIDIA-Omniverse/kit-cae"
+
+[dependencies]
+"omni.cae.core" = {}
+"omni.cae.pip_prebundle" = {}
+"omni.cae.schema" = {}
+"omni.cae.usd_plugins" = {}
+"omni.kit.commands" = {}
+"omni.kit.window.preferences" = {optional = true}
+"omni.usd" = {}
+"omni.warp.core" = {}
+
+[[python.module]]
+name = "omni.cae.simdata"
+
+[[test]]
+dependencies = [
+    "omni.cae.testing"
+]
+
+[documentation]
+pages = [
+    "docs/Overview.md",
+    "docs/ArrayExpressionLanguage.md",
+    "docs/CHANGELOG.md",
+]

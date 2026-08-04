@@ -16,17 +16,24 @@ import logging
 
 import omni.kit.app
 import omni.kit.test
-from omni.cae.importer.cgns.importer import import_to_stage
+from omni.cae.core import usd_utils
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.cae.viz.execution_context import ExecutionContext, ExecutionReason
 from omni.cae.viz.operator import operator, register_module_operators, unregister_module_operators
 from omni.timeline import get_timeline_interface
 from omni.usd import get_context
-from pxr import Sdf, Usd
+from pxr import Gf, Sdf, Usd, UsdGeom
+
+from ._operator_test_utils import wait_for_operator_complete
 
 logger = logging.getLogger(__name__)
 # Test operator classes with different temporal configurations
+
+
+def _set_field_names(field_selection_api: cae_viz.FieldSelectionAPI, *names: str) -> None:
+    field_selection_api.CreateFieldNamesAttr().Set(list(names))
 
 
 class Operators:
@@ -156,6 +163,7 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         # Create a new stage
         await self.usd_context.new_stage_async()
         self.stage = self.usd_context.get_stage()
+        self.stage.SetTimeCodesPerSecond(1.0)
 
         self.timeline = get_timeline_interface()
         self.timeline.set_time_codes_per_second(1.0)
@@ -163,9 +171,9 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         self.timeline.set_end_time(100.0)
         self.timeline.set_current_time(0.0)
 
-        # Import hex_timesteps.cgns with time_scale of 10
+        # Import hex_timesteps.cgns with time scale of 10
         hex_path = get_test_data_path("hex_timesteps.cgns")
-        await import_to_stage(hex_path, "/World/hex_timesteps", time_scale=10.0)
+        await import_to_stage(hex_path, "/World/hex_timesteps", scale=10.0, source="TimeStep")
 
         # Import StaticMixer.cgns
         mixer_path = get_test_data_path("StaticMixer.cgns")
@@ -194,11 +202,48 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         )  # -1.0 indicates no next timecode
         prim.CreateAttribute("test:last_timestep_index", Sdf.ValueTypeNames.Int).Set(0)
 
+    def get_bracket(self, prim: Usd.Prim, raw_time: float) -> tuple[float, float]:
+        lower, upper, has_time_samples = usd_utils.get_bracketing_time_samples_for_prim(prim, raw_time)
+        self.assertTrue(has_time_samples, f"{prim.GetPath()} should have time samples")
+        return lower, upper
+
     async def forward_frames(self, frames: int):
         """Forward the timeline by the given number of frames."""
         for _ in range(frames):
             self.timeline.forward_one_frame()
             await wait_for_update(0)
+
+    async def _assert_roi_transform_reexecutes_operator(self, api_type, suffix: str):
+        roi_path = f"/World/ROITransformDependency_{suffix}"
+        roi_cube = UsdGeom.Cube.Define(self.stage, roi_path)
+        translate_op = roi_cube.AddTranslateOp()
+        translate_op.Set(Gf.Vec3d(0.0, 0.0, 0.0))
+
+        operator_path = f"/World/ROITransformDependencyOperator_{suffix}"
+        operator_prim = self.stage.DefinePrim(operator_path, "Cube")
+        self.init_prim(operator_prim)
+
+        async with wait_for_operator_complete(operator_path, operator="NonTemporalOperator"):
+            cae_viz.OperatorAPI.Apply(operator_prim)
+            cae_viz.OperatorAPI(operator_prim).GetEnabledAttr().Set(True)
+            api_type.Apply(operator_prim, "source")
+            api_type(operator_prim, "source").CreateRoiRel().SetTargets({roi_cube.GetPath()})
+
+        self.assertEqual(operator_prim.GetAttribute("test:exec_count").Get(), 1)
+
+        async with wait_for_operator_complete(operator_path, operator="NonTemporalOperator"):
+            translate_op.Set(Gf.Vec3d(1.0, 2.0, 3.0))
+
+        self.assertEqual(operator_prim.GetAttribute("test:exec_count").Get(), 2)
+        self.assertEqual(operator_prim.GetAttribute("test:last_reason").Get(), ExecutionReason.STRUCTURAL_CHANGE.value)
+
+    async def test_operator_reexecutes_when_subset_roi_transform_changes(self):
+        """DatasetSubsetAPI ROI transforms are operator execution dependencies."""
+        await self._assert_roi_transform_reexecutes_operator(cae_viz.DatasetSubsetAPI, "Subset")
+
+    async def test_operator_reexecutes_when_voxelization_roi_transform_changes(self):
+        """DatasetVoxelizationAPI ROI transforms are operator execution dependencies."""
+        await self._assert_roi_transform_reexecutes_operator(cae_viz.DatasetVoxelizationAPI, "Voxelization")
 
     async def test_non_temporal_operator_non_temporal_dataset(self):
         """Test that non-temporal operator executes on every change."""
@@ -268,9 +313,7 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         )
 
         cae_viz.FieldSelectionAPI.Apply(non_temporal_prim, "colors")
-        cae_viz.FieldSelectionAPI(non_temporal_prim, "colors").GetTargetRel().SetTargets(
-            {"/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"}
-        )
+        _set_field_names(cae_viz.FieldSelectionAPI(non_temporal_prim, "colors"), "PointSinusoid")
         await wait_for_update(0)
 
         # Should have executed once
@@ -281,10 +324,11 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         reason = non_temporal_prim.GetAttribute("test:last_reason").Get()
         self.assertIn(reason, [ExecutionReason.STRUCTURAL_CHANGE.value, ExecutionReason.INITIAL.value])
 
-        # Move timeline forward (temporal dataset has time samples scaled by 10)
-        await self.forward_frames(10)
+        # Move timeline to a new bracketed sample on the plugin-backed dataset.
+        self.timeline.set_current_time(10.0)
+        await wait_for_update(0)
 
-        # Non-temporal operator should have excuted once more
+        # Non-temporal operator should have executed once more
         self.assertEqual(non_temporal_prim.GetAttribute("test:exec_count").Get(), 2)
         # Tick should not have been called
         self.assertEqual(non_temporal_prim.GetAttribute("test:tick_count").Get(), 0)
@@ -332,9 +376,7 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
             {"/World/hex_timesteps/Base/Zone/ElementsUniform"}
         )
         cae_viz.FieldSelectionAPI.Apply(temporal_prim, "colors")
-        cae_viz.FieldSelectionAPI(temporal_prim, "colors").GetTargetRel().SetTargets(
-            {"/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"}
-        )
+        _set_field_names(cae_viz.FieldSelectionAPI(temporal_prim, "colors"), "PointSinusoid")
         await wait_for_update(0)
 
         # Should have executed once (initial/structural)
@@ -344,8 +386,9 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         self.assertIn(reason, [ExecutionReason.STRUCTURAL_CHANGE.value, ExecutionReason.INITIAL.value])
         self.assertTrue(temporal_prim.GetAttribute("test:is_full_rebuild").Get())
 
-        # Move timeline forward to a new timecode
-        await self.forward_frames(10)
+        # Move timeline to a new timecode
+        self.timeline.set_current_time(10.0)
+        await wait_for_update(0)
 
         # Should execute (first time at this timecode)
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 2)
@@ -356,7 +399,8 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         self.assertTrue(temporal_prim.GetAttribute("test:is_temporal_update").Get())
 
         # Move to another new timecode
-        await self.forward_frames(10)
+        self.timeline.set_current_time(20.0)
+        await wait_for_update(0)
 
         # Should execute (first time at this timecode)
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 3)
@@ -371,7 +415,8 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         self.assertEqual(temporal_prim.GetAttribute("test:tick_count").Get(), 0)
 
         # Go to second timecode again
-        await self.forward_frames(10)
+        self.timeline.set_current_time(10.0)
+        await wait_for_update(0)
 
         # Should NOT execute (already seen this timecode)
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 3)
@@ -415,9 +460,7 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
             {"/World/hex_timesteps/Base/Zone/ElementsUniform"}
         )
         cae_viz.FieldSelectionAPI.Apply(temporal_prim, "colors")
-        cae_viz.FieldSelectionAPI(temporal_prim, "colors").GetTargetRel().SetTargets(
-            {"/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"}
-        )
+        _set_field_names(cae_viz.FieldSelectionAPI(temporal_prim, "colors"), "PointSinusoid")
         await wait_for_update(0)
 
         # Should have executed once (initial/structural)
@@ -429,8 +472,9 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         self.assertTrue(temporal_prim.GetAttribute("test:is_full_rebuild").Get())
         self.assertTrue(temporal_prim.GetAttribute("test:is_temporal_tick").Get())
 
-        # Move timeline forward to a new timecode
-        await self.forward_frames(10)
+        # Move timeline to a new timecode
+        self.timeline.set_current_time(10.0)
+        await wait_for_update(0)
 
         # Should execute (first time at this timecode) AND tick
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 2)
@@ -441,7 +485,8 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         self.assertTrue(temporal_prim.GetAttribute("test:is_temporal_update").Get())
 
         # Move to another new timecode
-        await self.forward_frames(10)
+        self.timeline.set_current_time(20.0)
+        await wait_for_update(0)
 
         # Should execute AND tick
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 3)
@@ -496,9 +541,7 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
             {"/World/hex_timesteps/Base/Zone/ElementsUniform"}
         )
         cae_viz.FieldSelectionAPI.Apply(temporal_prim, "colors")
-        cae_viz.FieldSelectionAPI(temporal_prim, "colors").GetTargetRel().SetTargets(
-            {"/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"}
-        )
+        _set_field_names(cae_viz.FieldSelectionAPI(temporal_prim, "colors"), "PointSinusoid")
         await wait_for_update(0)
 
         # Should have executed once (initial)
@@ -542,21 +585,18 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
             {"/World/hex_timesteps/Base/Zone/ElementsUniform"}
         )
         cae_viz.FieldSelectionAPI.Apply(temporal_prim, "colors")
-        cae_viz.FieldSelectionAPI(temporal_prim, "colors").GetTargetRel().SetTargets(
-            {"/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"}
-        )
+        _set_field_names(cae_viz.FieldSelectionAPI(temporal_prim, "colors"), "PointSinusoid")
         await wait_for_update(0)
 
         # Initial execution should have timestep_index=0
         last_timestep_index = temporal_prim.GetAttribute("test:last_timestep_index").Get()
         self.assertIn(last_timestep_index, [0, 1])  # Could be 0 or 1 depending on whether next was also executed
 
-        # Move to a time between samples where we know there are both lower and upper samples
-        # hex_timesteps has samples at 0, 10, 20, 30, ...
-        self.timeline.set_current_time(15.0)  # Between 10 and 20
+        # Move to a time between plugin-backed samples where both lower and upper samples exist.
+        self.timeline.set_current_time(5.0)
         await wait_for_update(0)
 
-        # Should execute for time 10.0 (t0, timestep_index=0) and 20.0 (t0+1, timestep_index=1)
+        # Should execute for the lower sample (t0) and upper sample (t0+1).
         # The last_timestep_index will be from the last execution (should be timestep_index=1 for next)
         exec_count = temporal_prim.GetAttribute("test:exec_count").Get()
         self.assertGreaterEqual(exec_count, 2)
@@ -575,10 +615,10 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         cae_viz.OperatorAPI.Apply(temporal_prim)
         cae_viz.OperatorAPI(temporal_prim).GetEnabledAttr().Set(True)
 
-        # Apply OperatorTemporalAPI and enable locked time at time 20.0
+        # Apply OperatorTemporalAPI and enable locked time at a plugin-backed time sample.
         cae_viz.OperatorTemporalAPI.Apply(temporal_prim)
         cae_viz.OperatorTemporalAPI(temporal_prim).GetUseLockedTimeAttr().Set(True)
-        cae_viz.OperatorTemporalAPI(temporal_prim).GetLockedTimeAttr().Set(20.0)
+        cae_viz.OperatorTemporalAPI(temporal_prim).GetLockedTimeAttr().Set(10.0)
 
         # Point to temporal dataset (hex_timesteps)
         cae_viz.DatasetSelectionAPI.Apply(temporal_prim, "source")
@@ -586,27 +626,26 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
             {"/World/hex_timesteps/Base/Zone/ElementsUniform"}
         )
         cae_viz.FieldSelectionAPI.Apply(temporal_prim, "colors")
-        cae_viz.FieldSelectionAPI(temporal_prim, "colors").GetTargetRel().SetTargets(
-            {"/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"}
-        )
+        _set_field_names(cae_viz.FieldSelectionAPI(temporal_prim, "colors"), "PointSinusoid")
         await wait_for_update(0)
 
-        # Should have executed once at locked time (20.0), not at current time (0.0)
+        # Should have executed once at locked time, not at current time (0.0)
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 1)
         self.assertEqual(temporal_prim.GetAttribute("test:tick_count").Get(), 1)
         reason = temporal_prim.GetAttribute("test:last_reason").Get()
         self.assertIn(reason, [ExecutionReason.STRUCTURAL_CHANGE.value, ExecutionReason.INITIAL.value])
 
-        # The execution should have happened at locked time (20.0)
+        # The execution should have happened at the lower bracket for locked time 10.0.
+        locked_lower, _ = self.get_bracket(temporal_prim, 10.0)
         last_timecode = temporal_prim.GetAttribute("test:last_timecode").Get()
-        self.assertEqual(last_timecode, 20.0)
+        self.assertAlmostEqual(last_timecode, locked_lower)
         last_raw_timecode = temporal_prim.GetAttribute("test:last_raw_timecode").Get()
-        self.assertEqual(last_raw_timecode, 20.0)
+        self.assertEqual(last_raw_timecode, 10.0)
 
-        # Move timeline forward - operator should NOT execute again (locked to time 20.0)
+        # Move timeline forward - operator should NOT execute again while locked.
         await self.forward_frames(10)
 
-        # Should NOT execute (still locked to time 20.0)
+        # Should NOT execute (still locked to time 10.0)
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 1)
         # Tick should NOT fire either (since we're still effectively at locked time)
         self.assertEqual(temporal_prim.GetAttribute("test:tick_count").Get(), 1)
@@ -615,25 +654,26 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         self.timeline.set_current_time(30.0)
         await wait_for_update(0)
 
-        # Should still NOT execute (locked to time 20.0)
+        # Should still NOT execute (locked to time 10.0)
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 1)
         self.assertEqual(temporal_prim.GetAttribute("test:tick_count").Get(), 1)
 
-        # Change locked time to 30.0
-        cae_viz.OperatorTemporalAPI(temporal_prim).GetLockedTimeAttr().Set(30.0)
+        # Change locked time to another plugin-backed sample.
+        cae_viz.OperatorTemporalAPI(temporal_prim).GetLockedTimeAttr().Set(20.0)
         await wait_for_update(0)
 
-        # Should execute at new locked time (30.0) - this is a structural change
+        # Should execute at new locked time - this is a structural change
         self.assertEqual(temporal_prim.GetAttribute("test:exec_count").Get(), 2)
         self.assertEqual(temporal_prim.GetAttribute("test:tick_count").Get(), 2)
         reason = temporal_prim.GetAttribute("test:last_reason").Get()
         self.assertEqual(reason, ExecutionReason.STRUCTURAL_CHANGE.value)
 
-        # Verify execution happened at new locked time
+        # Verify execution happened at the lower bracket for new locked time.
+        locked_lower, _ = self.get_bracket(temporal_prim, 20.0)
         last_timecode = temporal_prim.GetAttribute("test:last_timecode").Get()
-        self.assertEqual(last_timecode, 30.0)
+        self.assertAlmostEqual(last_timecode, locked_lower)
         last_raw_timecode = temporal_prim.GetAttribute("test:last_raw_timecode").Get()
-        self.assertEqual(last_raw_timecode, 30.0)
+        self.assertEqual(last_raw_timecode, 20.0)
 
         # Disable locked time
         cae_viz.OperatorTemporalAPI(temporal_prim).GetUseLockedTimeAttr().Set(False)
@@ -645,9 +685,10 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         reason = temporal_prim.GetAttribute("test:last_reason").Get()
         self.assertEqual(reason, ExecutionReason.STRUCTURAL_CHANGE.value)
 
-        # Now should follow timeline
+        # Now should follow timeline.
+        timeline_lower, _ = self.get_bracket(temporal_prim, 30.0)
         last_timecode = temporal_prim.GetAttribute("test:last_timecode").Get()
-        self.assertEqual(last_timecode, 30.0)  # Current timeline time
+        self.assertAlmostEqual(last_timecode, timeline_lower)
 
         # Move timeline - should now execute at new time (not locked anymore)
         self.timeline.set_current_time(40.0)
@@ -686,45 +727,42 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
             {"/World/hex_timesteps/Base/Zone/ElementsUniform"}
         )
         cae_viz.FieldSelectionAPI.Apply(temporal_prim, "colors")
-        cae_viz.FieldSelectionAPI(temporal_prim, "colors").GetTargetRel().SetTargets(
-            {"/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"}
-        )
+        _set_field_names(cae_viz.FieldSelectionAPI(temporal_prim, "colors"), "PointSinusoid")
         await wait_for_update(0)
 
         # Initial execution: next_time_code should be -1.0 (None sentinel)
         next_time_code = temporal_prim.GetAttribute("test:next_time_code").Get()
         self.assertEqual(next_time_code, -1.0, "next_time_code should be None when interpolation is disabled")
 
-        # Move to a time between samples (where next sample definitely exists)
-        # hex_timesteps has samples at 0, 10, 20, 30, ...
-        self.timeline.set_current_time(15.0)  # Between 10 and 20
+        # Move to a time between plugin-backed samples where a next sample exists.
+        self.timeline.set_current_time(5.0)
         await wait_for_update(0)
+        lower, upper = self.get_bracket(temporal_prim, 5.0)
 
         # Verify next_time_code is still None (-1.0 sentinel) despite next sample existing
         next_time_code = temporal_prim.GetAttribute("test:next_time_code").Get()
         self.assertEqual(next_time_code, -1.0, "next_time_code should remain None when interpolation is disabled")
 
-        # Verify current timecode is still set correctly (snapped to 10.0)
+        # Verify current timecode is still set correctly (snapped to the lower bracket)
         last_timecode = temporal_prim.GetAttribute("test:last_timecode").Get()
-        self.assertEqual(last_timecode, 10.0, "Current timecode should be snapped to lower bracket")
+        self.assertAlmostEqual(last_timecode, lower, msg="Current timecode should be snapped to lower bracket")
 
         # Now ENABLE interpolation - next_time_code should become valid
         cae_viz.OperatorTemporalAPI(temporal_prim).GetEnableFieldInterpolationAttr().Set(True)
         await wait_for_update(0)
 
-        # This is a structural change, so should re-execute at current timeline position (15.0)
+        # This is a structural change, so should re-execute at the current timeline position.
         # After this, next_time_code should be set
-        # The structural change means it will execute at the snapped timecode for 15.0
-        # which is 10.0 (lower bracket), with next being 20.0
+        # The structural change means it will execute at the snapped lower bracket, with next being upper.
 
-        # Verify next_time_code is now valid (20.0, not 30.0)
+        # Verify next_time_code is now valid.
         next_time_code = temporal_prim.GetAttribute("test:next_time_code").Get()
         self.assertNotEqual(next_time_code, -1.0, "next_time_code should be valid when interpolation is enabled")
-        self.assertEqual(next_time_code, 20.0, "next_time_code should be upper bracket (20.0)")
+        self.assertAlmostEqual(next_time_code, upper, msg="next_time_code should be upper bracket")
 
-        # Verify current timecode is snapped to 10.0
+        # Verify current timecode is snapped to the lower bracket.
         last_timecode = temporal_prim.GetAttribute("test:last_timecode").Get()
-        self.assertEqual(last_timecode, 10.0, "Current timecode should be snapped to lower bracket")
+        self.assertAlmostEqual(last_timecode, lower, msg="Current timecode should be snapped to lower bracket")
 
     async def test_non_temporal_operator_with_interpolation_disabled(self):
         """
@@ -759,7 +797,7 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         next_time_code = non_temporal_prim.GetAttribute("test:next_time_code").Get()
         self.assertEqual(next_time_code, -1.0)
 
-        # Move to different time - non-temporal should re-execute
+        # Move to a different plugin-backed time - non-temporal should re-execute.
         self.timeline.set_current_time(10.0)
         await wait_for_update(0)
 
@@ -779,9 +817,8 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         exec_count = non_temporal_prim.GetAttribute("test:exec_count").Get()
         # Non-temporal operators re-execute when timecode changes
         # However, moving from 10.0 to 0.0 should trigger execution
-        # Total: 1 (initial) + 1 (0→10) + 1 (10→0) = 3
+        # Total: 1 (initial) + 1 (0 to 10) + 1 (10 to 0) = 3
         # But if it's the same snapped timecode, it might not execute
-        # Since 0.0 and 10.0 are both actual time samples, this should be 3
         self.assertGreaterEqual(exec_count, 2, "Non-temporal should re-execute at least once more")
 
     async def test_multiple_operators_independent_interpolation_settings(self):
@@ -818,23 +855,22 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
 
         await wait_for_update(0)
 
-        # Move to a time between samples
-        self.timeline.set_current_time(15.0)  # Between 10 and 20
+        # Move to a time between plugin-backed samples.
+        self.timeline.set_current_time(15.0)
         await wait_for_update(0)
+        _, upper = self.get_bracket(interp_enabled_prim, 15.0)
 
         # Operator with interpolation enabled should have next_time_code
-        # Timeline is at 15.0, which snaps to (10.0, 20.0)
         enabled_next = interp_enabled_prim.GetAttribute("test:next_time_code").Get()
-        self.assertEqual(enabled_next, 20.0, "Interpolation-enabled operator should have next_time_code")
+        self.assertAlmostEqual(enabled_next, upper, msg="Interpolation-enabled operator should have next_time_code")
 
         # Operator with interpolation disabled should NOT have next_time_code
         disabled_next = interp_disabled_prim.GetAttribute("test:next_time_code").Get()
         self.assertEqual(disabled_next, -1.0, "Interpolation-disabled operator should have None next_time_code")
 
-        # Both should have same current timecode (snapped to 10.0)
+        # Both should have the same current timecode (snapped to the lower bracket).
         enabled_current = interp_enabled_prim.GetAttribute("test:last_timecode").Get()
         disabled_current = interp_disabled_prim.GetAttribute("test:last_timecode").Get()
-        # Both should be at 10.0 (lower bracket for time 15.0)
         # But they might have executed at different times during setup
         # Let's just verify they're both set to valid time samples
         self.assertGreater(enabled_current, 0.0, "Enabled operator should have valid timecode")
@@ -850,7 +886,7 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         cae_viz.OperatorAPI.Apply(non_temporal_prim)
         cae_viz.OperatorAPI(non_temporal_prim).GetEnabledAttr().Set(True)
 
-        # Apply OperatorTemporalAPI and enable locked time at time 10.0
+        # Apply OperatorTemporalAPI and enable locked time at a plugin-backed time sample.
         cae_viz.OperatorTemporalAPI.Apply(non_temporal_prim)
         cae_viz.OperatorTemporalAPI(non_temporal_prim).GetUseLockedTimeAttr().Set(True)
         cae_viz.OperatorTemporalAPI(non_temporal_prim).GetLockedTimeAttr().Set(10.0)
@@ -862,15 +898,16 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
         )
         await wait_for_update(0)
 
-        # Should have executed once at locked time (10.0)
+        # Should have executed once at locked time.
         self.assertEqual(non_temporal_prim.GetAttribute("test:exec_count").Get(), 1)
         self.assertEqual(non_temporal_prim.GetAttribute("test:tick_count").Get(), 0)
         reason = non_temporal_prim.GetAttribute("test:last_reason").Get()
         self.assertIn(reason, [ExecutionReason.STRUCTURAL_CHANGE.value, ExecutionReason.INITIAL.value])
 
-        # The execution should have happened at locked time (10.0)
+        # The execution should have happened at the lower bracket for locked time 10.0.
+        locked_lower, _ = self.get_bracket(non_temporal_prim, 10.0)
         last_timecode = non_temporal_prim.GetAttribute("test:last_timecode").Get()
-        self.assertEqual(last_timecode, 10.0)
+        self.assertAlmostEqual(last_timecode, locked_lower)
 
         # Move timeline - non-temporal operator should NOT execute again
         # because locked time hasn't changed (still 10.0)
@@ -883,7 +920,7 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
 
         # But should still be using locked time
         last_timecode = non_temporal_prim.GetAttribute("test:last_timecode").Get()
-        self.assertEqual(last_timecode, 10.0)  # Still locked to 10.0, not timeline time
+        self.assertAlmostEqual(last_timecode, locked_lower)  # Still locked, not timeline time
 
         # Move timeline again
         self.timeline.set_current_time(30.0)
@@ -894,4 +931,4 @@ class TestControllerOperatorExecution(omni.kit.test.AsyncTestCase):
 
         # Still locked to 10.0
         last_timecode = non_temporal_prim.GetAttribute("test:last_timecode").Get()
-        self.assertEqual(last_timecode, 10.0)
+        self.assertAlmostEqual(last_timecode, locked_lower)

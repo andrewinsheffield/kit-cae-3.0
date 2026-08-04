@@ -14,23 +14,27 @@ from omni.ext import IExt
 from omni.kit.property.bundle import GeomPrimSchemeDelegate
 from omni.kit.window.property import get_window
 
-from .property_widget import CaeFieldArrayPropertiesWidget, CaeGeomPrimSchemeDelegate, CaePropertiesWidget
+from .property_widget import (
+    CaeGeomPrimSchemeDelegate,
+    CaePropertiesWidget,
+    OmniSciPropertiesWidget,
+    RtwtPropertiesWidget,
+)
 
 
 class Extension(IExt):
 
-    def _register_widget(self, property_window, scheme, name, *args, **kwargs):
-        property_window.register_widget(scheme, name, *args, **kwargs)
-
     def on_startup(self, ext_id):
         if property_window := get_window():
             property_window.register_widget("prim", "cae", CaePropertiesWidget("CAE"))
-            property_window.register_widget("prim", "cae_field_array", CaeFieldArrayPropertiesWidget("CAE Insights"))
+            property_window.register_widget("prim", "rtwt", RtwtPropertiesWidget("RTWT"))
+            property_window.register_widget("prim", "omni_sci", OmniSciPropertiesWidget("Omni Scientific"))
             property_window.register_scheme_delegate("prim", "xformable_prim", CaeGeomPrimSchemeDelegate())
 
     def on_shutdown(self):
         if property_window := get_window():
-            property_window.unregister_widget("prim", "cae_field_array")
+            property_window.unregister_widget("prim", "omni_sci")
+            property_window.unregister_widget("prim", "rtwt")
             property_window.unregister_widget("prim", "cae")
             # restore the default GeomPrimSchemeDelegate
             property_window.register_scheme_delegate("prim", "xformable_prim", GeomPrimSchemeDelegate())

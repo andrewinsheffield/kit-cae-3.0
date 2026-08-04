@@ -29,14 +29,10 @@ Three load paths, dispatched by file extension:
       then take the USD path above.
 
   VTU / VTI / VTP / VTS / VTK
-      Hand the file to `omni.cae.importer.vtk.import_to_stage(path,
-      prim_path)`. The importer is async, doesn't write a sidecar USD,
-      and authors `cae.DataSet` (with format-specific schema APIs and
-      every point/cell field array preserved as `cae_vtk.FieldArray`
-      children) directly at `prim_path` on the live stage. The
-      `omni.cae.delegate.vtk` extension picks up the schema at
-      composition time and exposes the volume to viz pipelines —
-      transfer functions, glyphs, slices, streamlines.
+      Hand the file to the unified
+      `omni.cae.usd_plugins_importers.import_to_stage(path, prim_path)`
+      dispatcher. The payload opens through the native USD file-format plugin
+      and exposes `OmniSciDataset` prims with fields as multiple-apply APIs.
 
 In all three branches the post-load steps are identical: a brief Fabric
 settle, `frame_viewport_prims([prim_path])`, then a background thumbnail
@@ -61,11 +57,7 @@ from pathlib import Path
 
 import carb
 from omni.cae.testing import wait_for_update
-from omni.kit.viewport.utility import (
-    capture_viewport_to_file,
-    frame_viewport_prims,
-    get_active_viewport,
-)
+from omni.kit.viewport.utility import capture_viewport_to_file, frame_viewport_prims, get_active_viewport
 from omni.usd import get_context
 from pxr import Gf, Usd, UsdGeom
 
@@ -94,11 +86,7 @@ def _resolve_source(entry: dict) -> Path | None:
     existing match, or the `$CAE_FS_ROOT`-resolved path if neither
     hits — so the load() error message points at the more useful root.
     """
-    raw = (
-        entry.get("asset_path")
-        or entry.get("usda_path")
-        or entry.get("usd_ref")
-    )
+    raw = entry.get("asset_path") or entry.get("usda_path") or entry.get("usd_ref")
     if not raw:
         return None
     p = Path(os.path.expandvars(raw))
@@ -108,9 +96,7 @@ def _resolve_source(entry: dict) -> Path | None:
     candidates: list[Path] = []
     if cae_fs_root:
         candidates.append((Path(cae_fs_root).expanduser().resolve() / p).resolve())
-    candidates.append(
-        (Path(os.environ.get("KIT_CAE_DIR", ".")).resolve() / p).resolve()
-    )
+    candidates.append((Path(os.environ.get("KIT_CAE_DIR", ".")).resolve() / p).resolve())
     for cand in candidates:
         if cand.exists():
             return cand
@@ -159,9 +145,7 @@ async def _convert_to_usd(source: Path) -> Path | None:
     try:
         import omni.kit.asset_converter as converter  # type: ignore[import-not-found]
     except ImportError as exc:
-        carb.log_warn(
-            f"[asset_reference] omni.kit.asset_converter not available: {exc}"
-        )
+        carb.log_warn(f"[asset_reference] omni.kit.asset_converter not available: {exc}")
         return None
 
     options = converter.AssetConverterContext()
@@ -172,9 +156,7 @@ async def _convert_to_usd(source: Path) -> Path | None:
     options.ignore_light = True
 
     task_manager = converter.get_instance()
-    task = task_manager.create_converter_task(
-        str(source), str(out_path), None, options
-    )
+    task = task_manager.create_converter_task(str(source), str(out_path), None, options)
     try:
         success = await task.wait_until_finished()
     except Exception as exc:  # noqa: BLE001
@@ -190,26 +172,17 @@ async def _convert_to_usd(source: Path) -> Path | None:
         carb.log_warn(f"[asset_reference] asset_converter failed: {msg}")
         return None
     if not out_path.exists():
-        carb.log_warn(
-            f"[asset_reference] asset_converter reported success but {out_path} is missing"
-        )
+        carb.log_warn(f"[asset_reference] asset_converter reported success but {out_path} is missing")
         return None
     return out_path
 
 
 async def _import_vtk(source: Path, prim_path: str) -> str | None:
-    """Hand a VTK file to `omni.cae.importer.vtk.import_to_stage`.
-
-    The importer authors a `cae.DataSet` prim (with format-specific
-    schema APIs and all field arrays preserved) directly at
-    `prim_path` on the live stage. No sidecar USD is written.
-
-    Returns None on success, or an error string describing the failure.
-    """
+    """Import VTK through the shared CAE USD-plugin payload importer."""
     try:
-        from omni.cae.importer.vtk import import_to_stage  # type: ignore[import-not-found]
+        from omni.cae.usd_plugins_importers import import_to_stage
     except ImportError as exc:
-        return f"omni.cae.importer.vtk unavailable: {exc}"
+        return f"omni.cae.usd_plugins_importers unavailable: {exc}"
     try:
         await import_to_stage(str(source), prim_path)
     except Exception as exc:  # noqa: BLE001
@@ -224,52 +197,51 @@ async def _import_vtk(source: Path, prim_path: str) -> str | None:
 # density, temperature) and classic VTK demo datasets (which often use
 # `Scalars_`).
 _PREFERRED_COLOR_FIELDS = (
-    "u_magnitude", "u_mag", "velocity_magnitude", "velocity",
+    "u_magnitude",
+    "u_mag",
+    "velocity_magnitude",
+    "velocity",
     "speed",
-    "pressure", "p", "rho", "density",
-    "temperature", "T", "T_out",
-    "Scalars_", "scalars",
+    "pressure",
+    "p",
+    "rho",
+    "density",
+    "temperature",
+    "T",
+    "T_out",
+    "Scalars_",
+    "scalars",
 )
 
 
 def _find_dataset_prim(stage, root_prim_path: str) -> str | None:
-    """Return the path of the first `cae.DataSet`-typed prim under
-    (or at) `root_prim_path`, or None if none exists."""
+    """Return the first OmniSciDataset path under ``root_prim_path``."""
     try:
-        from omni.cae.schema import cae as _cae  # type: ignore[import-not-found]
+        from pxr import OmniSci
     except ImportError as exc:
-        carb.log_warn(f"[asset_reference] omni.cae.schema not importable: {exc}")
+        carb.log_warn(f"[asset_reference] OmniSci schema not importable: {exc}")
         return None
     root = stage.GetPrimAtPath(root_prim_path)
     if not root or not root.IsValid():
         return None
     for prim in Usd.PrimRange(root):
-        if prim.IsA(_cae.DataSet):
+        if prim.IsA(OmniSci.Dataset):
             return prim.GetPath().pathString
     return None
 
 
-def _pick_color_field(stage, root_prim_path: str) -> str | None:
-    """Find a sensible field prim under `<root>/PointData/` or
-    `<root>/CellData/` to bind to the volume's `colors` channel.
+def _pick_color_field(stage, dataset_path: str) -> str | None:
+    """Choose an OmniSciFieldAPI instance from a dataset prim."""
+    from omni.cae.core import usd_utils
 
-    The VTK importer puts field arrays at `<root>/{PointData|CellData}/<name>`
-    — siblings of the dataset prim, not children — so we walk those
-    scopes directly rather than the dataset.
-    """
-    candidates: list[str] = []
-    for container in ("PointData", "CellData"):
-        scope = stage.GetPrimAtPath(f"{root_prim_path}/{container}")
-        if not scope or not scope.IsValid():
-            continue
-        for child in scope.GetChildren():
-            candidates.append(child.GetPath().pathString)
+    dataset = stage.GetPrimAtPath(dataset_path)
+    candidates = usd_utils.get_instances(dataset, "OmniSciFieldAPI")
     if not candidates:
         return None
     for preferred in _PREFERRED_COLOR_FIELDS:
-        for path in candidates:
-            if path.rsplit("/", 1)[-1] == preferred:
-                return path
+        for name in candidates:
+            if name == preferred:
+                return name
     return candidates[0]
 
 
@@ -297,25 +269,19 @@ async def _visualize_vtk(stage, scene_id: str, root_prim_path: str) -> str:
     setup).
     """
     try:
-        from omni.cae.data.commands import execute_command  # type: ignore[import-not-found]
+        from omni.cae.core.commands import execute_command
         from omni.cae.schema import viz as cae_viz  # type: ignore[import-not-found]
     except ImportError as exc:
-        carb.log_warn(
-            f"[asset_reference] cae viz commands unavailable; default viz "
-            f"setup skipped: {exc}"
-        )
+        carb.log_warn(f"[asset_reference] cae viz commands unavailable; default viz " f"setup skipped: {exc}")
         return root_prim_path
 
     dataset_path = _find_dataset_prim(stage, root_prim_path)
     if not dataset_path:
-        carb.log_warn(
-            f"[asset_reference] no cae.DataSet prim under {root_prim_path}; "
-            "default viz setup skipped"
-        )
+        carb.log_warn(f"[asset_reference] no OmniSciDataset prim under {root_prim_path}; " "default viz setup skipped")
         return root_prim_path
 
     viz_kind = _pick_viz_kind(stage, dataset_path)
-    field_path = _pick_color_field(stage, root_prim_path)
+    field_name = _pick_color_field(stage, dataset_path)
 
     try:
         if viz_kind == "faces":
@@ -337,21 +303,15 @@ async def _visualize_vtk(stage, scene_id: str, root_prim_path: str) -> str:
         carb.log_warn(f"[asset_reference] CreateCaeViz{viz_kind} failed: {exc}")
         return root_prim_path
 
-    if field_path:
+    if field_name:
         try:
             viz_prim = stage.GetPrimAtPath(viz_path)
-            cae_viz.FieldSelectionAPI(viz_prim, "colors").CreateTargetRel().SetTargets([field_path])
-            carb.log_info(
-                f"[asset_reference] {scene_id}: {viz_kind} bound to color "
-                f"field {field_path}"
-            )
+            cae_viz.FieldSelectionAPI(viz_prim, "colors").CreateFieldNamesAttr().Set([field_name])
+            carb.log_info(f"[asset_reference] {scene_id}: {viz_kind} bound to color " f"field {field_name}")
         except Exception as exc:  # noqa: BLE001
             carb.log_warn(f"[asset_reference] color binding failed: {exc}")
     else:
-        carb.log_warn(
-            f"[asset_reference] {scene_id}: no PointData/CellData fields "
-            "found; volume will render flat"
-        )
+        carb.log_warn(f"[asset_reference] {scene_id}: no OmniSci fields " "found; volume will render flat")
     return viz_path
 
 
@@ -369,9 +329,7 @@ def _apply_unit_correction(stage, xform, ref_path: Path) -> None:
         stage_mpu = UsdGeom.GetStageMetersPerUnit(stage) or 1.0
         if abs(ref_mpu - stage_mpu) > 1e-9 and stage_mpu > 0:
             scale = ref_mpu / stage_mpu
-            UsdGeom.XformCommonAPI(xform).SetScale(
-                Gf.Vec3f(scale, scale, scale)
-            )
+            UsdGeom.XformCommonAPI(xform).SetScale(Gf.Vec3f(scale, scale, scale))
     except Exception as exc:  # noqa: BLE001
         carb.log_warn(f"[asset_reference] unit correction failed: {exc}")
 
@@ -401,10 +359,7 @@ async def load(scene_id: str, entry: dict) -> dict:
     if source_path is None:
         return {
             "ok": False,
-            "error": (
-                "registry entry missing 'asset_path'; set it on the "
-                "entry passed to register_scene."
-            ),
+            "error": ("registry entry missing 'asset_path'; set it on the " "entry passed to register_scene."),
         }
     if not source_path.exists():
         return {"ok": False, "error": f"source not found: {source_path}"}
@@ -419,8 +374,7 @@ async def load(scene_id: str, entry: dict) -> dict:
         inner = _extract_first_non_usd_ref(source_path)
         if inner is not None:
             carb.log_info(
-                f"[asset_reference] {source_path.name} wraps {inner.name}; "
-                "using the referenced file directly"
+                f"[asset_reference] {source_path.name} wraps {inner.name}; " "using the referenced file directly"
             )
             convert_input = inner
             ext = convert_input.suffix.lower()
@@ -430,18 +384,14 @@ async def load(scene_id: str, entry: dict) -> dict:
 
     viz_prim_path = prim_path
     if ext in _VTK_EXTS:
-        # VTK path: importer authors `cae.DataSet` + format-specific
-        # schema APIs directly at `prim_path` with all field arrays
-        # exposed. No Xform / AddReference / unit correction needed.
+        # VTK path: the importer authors a payload whose file-format plugin
+        # exposes OmniSci datasets and fields. No conversion sidecar is needed.
         # Importing alone isn't enough — without a viz operator the
         # dataset prim is invisible. _visualize_vtk wires a default
         # CreateCaeVizVolume (or CreateCaeVizFaces for PolyData) and
         # binds a sensible color field so the user actually sees
         # something on first composed frame.
-        carb.log_info(
-            f"[asset_reference] importing {convert_input.name} via "
-            "omni.cae.importer.vtk"
-        )
+        carb.log_info(f"[asset_reference] importing {convert_input.name} via " "omni.cae.usd_plugins_importers")
         err = await _import_vtk(convert_input, prim_path)
         if err is not None:
             return {"ok": False, "error": err, "scene_id": scene_id}

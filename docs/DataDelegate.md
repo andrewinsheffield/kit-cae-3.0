@@ -1,5 +1,12 @@
 # Data Delegate
 
+> [!IMPORTANT]
+> This document describes the legacy `CaeDataSet` / `CaeFieldArray` compatibility
+> stack under `source/legacy_extensions`. New file-format integrations should use
+> USD file-format plugins, `SdfAbstractData` lazy values, and the `OmniSciDataset`
+> model described in [Scientific Data Schemas](./UsdSchemas.md). The active Kit-CAE
+> application does not use Data Delegates for its primary data path.
+
 The Data Delegate infrastructure provides a collection of classes that centralize data loading and sharing across extensions in Kit CAE.
 The Data Delegate system works in conjunction with the [CAE USD Schema](./UsdSchemas.md) to enable seamless data access.
 When an extension needs to access data represented in a USD stage through a `CaeFieldArray` or its subtypes, it can utilize
@@ -111,7 +118,7 @@ public:
 
 Extensions that need to support reading new types of `CaeFieldArray` primitives can implement the `IDataDelegate`
 interface and register the implementation with the delegate registry. Here's an example from the
-CGNS extension ([`omni.cae.delegate.cgns`](../source/extensions/omni.cae.delegate.cgns/)):
+CGNS extension ([`omni.cae.delegate.cgns`](../source/legacy_extensions/omni.cae.delegate.cgns/)):
 
 ```c++
 class Extension : public omni::ext::IExt
@@ -143,10 +150,10 @@ public:
 
 ### Python Extension Implementation
 
-For Python extensions, [`omni.cae.delegate.npz`](../source/extensions/omni.cae.delegate.npz/) provides a good reference implementation:
+For Python extensions, [`omni.cae.delegate.npz`](../source/legacy_extensions/omni.cae.delegate.npz/) provides a compatibility reference implementation:
 
 ```python
-# Snippet from source/extensions/omni.cae.delegate.npz/python/extension.py
+# Snippet from source/legacy_extensions/omni.cae.delegate.npz/python/extension.py
 
 class Extension(omni.ext.IExt):
     def on_startup(self, ext_id):
@@ -245,11 +252,11 @@ arrays, or any object that supports NAI or CAI.
 
 #### C++ Implementation
 
-[`omni::cae::data::cgns::DataDelegate`](../source/extensions/omni.cae.delegate.cgns/plugins/omni.cae.delegate.cgns/DataDelegate.h)
+[`omni::cae::data::cgns::DataDelegate`](../source/legacy_extensions/omni.cae.delegate.cgns/plugins/omni.cae.delegate.cgns/DataDelegate.h)
  demonstrates how to access CGNS files to read requested data arrays:
 
 ```c++
-// Snippet from source/extensions/omni.cae.delegate.cgns/plugins/omni.cae.delegate.cgns/DataDelegate.cpp
+// Snippet from source/legacy_extensions/omni.cae.delegate.cgns/plugins/omni.cae.delegate.cgns/DataDelegate.cpp
 
 carb::ObjectPtr<IFieldArray> DataDelegate::getFieldArray(pxr::UsdPrim prim, pxr::UsdTimeCode time)
 {
@@ -273,10 +280,10 @@ carb::ObjectPtr<IFieldArray> DataDelegate::getFieldArray(pxr::UsdPrim prim, pxr:
 
 #### Python Implementation
 
-[`omni.cae.delegate.npz`](../source/extensions/omni.cae.delegate.npz/) demonstrates the same functionality in a Python-only extension:
+[`omni.cae.delegate.npz`](../source/legacy_extensions/omni.cae.delegate.npz/) demonstrates the same functionality in a Python-only extension:
 
 ```python
-# Snippet from source/extensions/omni.cae.delegate.npz/python/npz.py
+# Snippet from source/legacy_extensions/omni.cae.delegate.npz/python/npz.py
 from omni.cae.data.delegates import DataDelegateBase
 import numpy as np
 

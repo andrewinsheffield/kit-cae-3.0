@@ -11,10 +11,10 @@
 import asyncio
 
 import omni.timeline
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
 from pxr import Usd, UsdGeom, UsdVol
 
@@ -25,21 +25,23 @@ from pxr import Usd, UsdGeom, UsdVol
 
 async def main(skip_play: bool = False):
     # 0. Import the CGNS file
-    await import_to_stage(get_test_data_path("hex_timesteps.cgns"), "/World/hex_timesteps", time_scale=10.0)
+    await import_to_stage(get_test_data_path("hex_timesteps.cgns"), "/World/hex_timesteps", scale=10.0)
 
     ctx = get_context()
     stage: Usd.Stage = ctx.get_stage()
 
+    # Create CAE anchor
+    UsdGeom.Xform.Define(stage, "/World/CAE")
+
     # 1. Generate the support volume for slicing
     dataset_path: str = "/World/hex_timesteps/Base/Zone/ElementsUniform"
-    field_path: str = "/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"
     vol_path: str = "/World/CAE/Volume_ElementsUniform"
     await execute_command("CreateCaeVizVolume", dataset_path=dataset_path, prim_path=vol_path, type="vdb")
 
     # 2. Set the field for the volume
     vol_prim: Usd.Prim = stage.GetPrimAtPath(vol_path)
     colors_fs_api = cae_viz.FieldSelectionAPI(vol_prim, "colors")
-    colors_fs_api.CreateTargetRel().SetTargets([field_path])
+    colors_fs_api.CreateFieldNamesAttr().Set(["PointSinusoid"])
     await wait_for_update()
 
     # 3. Enable temporal interpolation

@@ -8,37 +8,66 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-import asyncio
 import json
 from logging import getLogger
 
 import numpy as np
 import omni.kit.test
-import warp as wp
-from omni.cae.data import usd_utils
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core import usd_utils
+from omni.cae.core.commands import execute_command
+from omni.cae.schema import cae
 from omni.cae.schema import viz as cae_viz
-from omni.cae.testing import get_test_data_path, get_vtrt_array_as_numpy, new_stage, wait_for_update
-from omni.kit.app import get_app
-from pxr import Usd
+from omni.cae.testing import get_test_data_path, new_stage, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
+from pxr import OmniSci, Usd
 from usdrt import UsdGeom as UsdGeomRT
 
+from ._operator_test_utils import read_rt_array, wait_for_operator_complete
+
 logger = getLogger(__name__)
+
+
+def _set_field_names(field_selection_api: cae_viz.FieldSelectionAPI, *names: str) -> None:
+    field_selection_api.CreateFieldNamesAttr().Set(list(names))
 
 
 class TestStreamlines(omni.kit.test.AsyncTestCase):
     tolerance = 1e-5
 
-    @staticmethod
-    def skip_if_kit_108():
-        """Skip test for Kit 108 where some behaviors differ."""
-        app_version = get_app().get_kit_version()
-        # Parse version string like "108.0.0+feature.221586.5941509b"
-        major_version = int(app_version.split(".")[0])
-        if major_version < 109:
-            return True
-        return False
+    def _get_rt_curves(self, viz_prim: Usd.Prim):
+        return UsdGeomRT.BasisCurves(usd_utils.get_prim_rt(viz_prim))
+
+    async def test_streamlines_consumes_derived_vector_field(self):
+        async with new_stage() as stage:
+            await import_to_stage(get_test_data_path("StaticMixer.cgns"), "/World/StaticMixer")
+            dataset_path = "/World/StaticMixer/Base/StaticMixer/B1_P3"
+            field_prim = next(
+                prim
+                for prim in stage.Traverse()
+                if all(prim.HasAPI(OmniSci.FieldAPI, name) for name in ("VelocityX", "VelocityY", "VelocityZ"))
+            )
+            expression = cae.ArrayExpressionAPI.Apply(field_prim, "derived_velocity")
+            expression.CreateExpressionAttr("vec3(VelocityX, VelocityY, VelocityZ)")
+
+            viz_path = "/World/CAE/Streamlines_Derived"
+            sphere_path = "/World/CAE/DerivedSeeds"
+            async with wait_for_operator_complete(viz_path, operator="Streamlines", allow_failure=True):
+                await execute_command(
+                    "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="standard"
+                )
+            await execute_command("CreateCaeVizMeshPrim", prim_type="UnitSphere", prim_path=sphere_path)
+            await execute_command("TransformPrimSRT", path=sphere_path, new_scale=[0.2, 0.2, 0.2])
+
+            viz_prim = stage.GetPrimAtPath(viz_path)
+            sphere_prim = stage.GetPrimAtPath(sphere_path)
+            async with wait_for_operator_complete(viz_path, operator="Streamlines"):
+                cae_viz.OperatorAPI(viz_prim).CreateDeviceAttr().Set("cpu")
+                cae_viz.StreamlinesAPI(viz_prim).GetDirectionAttr().Set(cae_viz.Tokens.forward)
+                cae_viz.DatasetSelectionAPI(viz_prim, "seeds").GetTargetRel().SetTargets({sphere_prim.GetPath()})
+                _set_field_names(cae_viz.FieldSelectionAPI(viz_prim, "velocities"), "derived_velocity")
+
+            points = read_rt_array(self._get_rt_curves(viz_prim).GetPointsAttr(), "derived streamline points")
+            self.assertGreater(len(points), 4)
 
     async def _streamlines_static_mixer(self, streamlines_type: str, use_colors: bool = False):
         async with new_stage() as stage:
@@ -48,12 +77,12 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
             dataset_path: str = f"{base_path}/B1_P3"
             viz_path: str = f"/World/CAE/Streamlines_B1_P3"
             sphere_path: str = f"/World/CAE/Sphere"
-            await execute_command(
-                "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type=streamlines_type
-            )
+            async with wait_for_operator_complete(viz_path, operator="Streamlines", allow_failure=True):
+                await execute_command(
+                    "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type=streamlines_type
+                )
             await execute_command("CreateCaeVizMeshPrim", prim_type="UnitSphere", prim_path=sphere_path)
             await execute_command("TransformPrimSRT", path=sphere_path, new_scale=[0.2, 0.2, 0.2])
-            await wait_for_update()
 
             viz_prim: Usd.Prim = stage.GetPrimAtPath(viz_path)
             sphere_prim: Usd.Prim = stage.GetPrimAtPath(sphere_path)
@@ -61,66 +90,59 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
             self.assertTrue(sphere_prim.IsValid())
 
             streamlines_api: cae_viz.StreamlinesAPI = cae_viz.StreamlinesAPI(viz_prim)
-            streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.forward)
 
             ds_api: cae_viz.DatasetSelectionAPI = cae_viz.DatasetSelectionAPI(viz_prim, "seeds")
-            ds_api.GetTargetRel().SetTargets({sphere_prim.GetPath()})
 
             vs_api = cae_viz.FieldSelectionAPI(viz_prim, "velocities")
-            vs_api.GetTargetRel().SetTargets(
-                [
-                    f"{base_path}/Flow_Solution/VelocityX",
-                    f"{base_path}/Flow_Solution/VelocityY",
-                    f"{base_path}/Flow_Solution/VelocityZ",
-                ]
-            )
 
-            if use_colors:
-                vs_api = cae_viz.FieldSelectionAPI(viz_prim, "colors")
-                vs_api.GetTargetRel().SetTargets([f"{base_path}/Flow_Solution/Temperature"])
-
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="Streamlines"):
+                streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.forward)
+                ds_api.GetTargetRel().SetTargets({sphere_prim.GetPath()})
+                _set_field_names(vs_api, "VelocityX", "VelocityY", "VelocityZ")
+                if use_colors:
+                    _set_field_names(cae_viz.FieldSelectionAPI(viz_prim, "colors"), "Temperature")
 
             # Get forward direction points
-            usdrt_curves = UsdGeomRT.BasisCurves(usd_utils.get_prim_rt(viz_prim))
-            points_forward = get_vtrt_array_as_numpy(usdrt_curves.GetPointsAttr())
+            curves = self._get_rt_curves(viz_prim)
+            points_forward = read_rt_array(curves.GetPointsAttr(), "forward points")
+            self.assertGreater(len(points_forward), 4)
 
             # Verify times and rnd primvars are present
-            times_attr = usdrt_curves.GetPrim().GetAttribute("primvars:times")
-            self.assertIsNotNone(times_attr, "times primvar should be present")
-            times_forward = get_vtrt_array_as_numpy(times_attr)
+            times_forward = read_rt_array(curves.GetPrim().GetAttribute("primvars:times"), "forward times primvar")
+            self.assertEqual(len(times_forward), len(points_forward))
             self.assertGreater(len(times_forward), 0, "times primvar should have values")
 
-            rnd_attr = usdrt_curves.GetPrim().GetAttribute("primvars:rnd")
-            self.assertIsNotNone(rnd_attr, "rnd primvar should be present")
-            rnd_forward = get_vtrt_array_as_numpy(rnd_attr)
+            rnd_forward = read_rt_array(curves.GetPrim().GetAttribute("primvars:rnd"), "forward rnd primvar")
             self.assertGreater(len(rnd_forward), 0, "rnd primvar should have values")
 
             colors_forward = None
             if use_colors:
-                colors_attr = usdrt_curves.GetPrim().GetAttribute("primvars:colors")
-                self.assertIsNotNone(colors_attr, "colors primvar should be present")
-                colors_forward = get_vtrt_array_as_numpy(colors_attr)
+                colors_forward = read_rt_array(
+                    curves.GetPrim().GetAttribute("primvars:colors"), "forward colors primvar"
+                )
+                self.assertEqual(len(colors_forward), len(points_forward))
 
             # Switch to backward direction
-            streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.backward)
-            await wait_for_update()
-            points_backward = get_vtrt_array_as_numpy(usdrt_curves.GetPointsAttr())
+            async with wait_for_operator_complete(viz_path, operator="Streamlines"):
+                streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.backward)
+            points_backward = read_rt_array(curves.GetPointsAttr(), "backward points")
+            self.assertFalse(np.array_equal(points_backward, points_forward))
             colors_backward = None
             if use_colors:
-                colors_attr = usdrt_curves.GetPrim().GetAttribute("primvars:colors")
-                self.assertIsNotNone(colors_attr, "colors primvar should be present")
-                colors_backward = get_vtrt_array_as_numpy(colors_attr)
+                colors_backward = read_rt_array(
+                    curves.GetPrim().GetAttribute("primvars:colors"), "backward colors primvar"
+                )
+                self.assertEqual(len(colors_backward), len(points_backward))
 
             # Move the sphere to the right
-            await execute_command("TransformPrimSRT", path=sphere_path, new_translation=[0.1, 0, 0])
-            await wait_for_update()
-            points_moved = get_vtrt_array_as_numpy(usdrt_curves.GetPointsAttr())
+            async with wait_for_operator_complete(viz_path, operator="Streamlines"):
+                await execute_command("TransformPrimSRT", path=sphere_path, new_translation=[0.1, 0, 0])
+            points_moved = read_rt_array(curves.GetPointsAttr(), "moved points")
+            self.assertFalse(np.array_equal(points_moved, points_backward))
             colors_moved = None
             if use_colors:
-                colors_attr = usdrt_curves.GetPrim().GetAttribute("primvars:colors")
-                self.assertIsNotNone(colors_attr, "colors primvar should be present")
-                colors_moved = get_vtrt_array_as_numpy(colors_attr)
+                colors_moved = read_rt_array(curves.GetPrim().GetAttribute("primvars:colors"), "moved colors primvar")
+                self.assertEqual(len(colors_moved), len(points_moved))
 
             # Return summary values for assertions in the test methods
             result = {
@@ -174,34 +196,30 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
         np.testing.assert_allclose(result["backward"]["max"], [1.9306283, 1.8990393, 1.9998803], atol=self.tolerance)
         self.assertEqual(result["backward"]["shape"], (34724, 3))
 
-        if not self.skip_if_kit_108():
-            # Moved sphere assertions
-            np.testing.assert_allclose(result["moved"]["min"], [-1.983881, -2.990228, -0.2], atol=self.tolerance)
-            np.testing.assert_allclose(result["moved"]["max"], [1.9660718, 2.9283297, 1.9999539], atol=self.tolerance)
-            self.assertEqual(result["moved"]["shape"], (31858, 3))
+        # Moved sphere assertions
+        np.testing.assert_allclose(result["moved"]["min"], [-1.983881, -2.990228, -0.2], atol=self.tolerance)
+        np.testing.assert_allclose(result["moved"]["max"], [1.9660718, 2.9283297, 1.9999539], atol=self.tolerance)
+        self.assertEqual(result["moved"]["shape"], (31858, 3))
 
     async def test_streamlines_static_mixer_nanovdb(self):
         result = await self._streamlines_static_mixer("nanovdb")
 
         # Forward direction assertions
         np.testing.assert_allclose(
-            result["forward"]["min"], [-0.19496827, -0.19781476, -2.01281691], atol=self.tolerance
+            result["forward"]["min"], [-0.19496827, -0.19781476, -2.01943183], atol=self.tolerance
         )
         np.testing.assert_allclose(result["forward"]["max"], [0.19890438, 0.19781476, 0.2], atol=self.tolerance)
-        self.assertEqual(result["forward"]["shape"], (38400, 3))
+        self.assertEqual(result["forward"]["shape"], (13218, 3))
 
         # Backward direction assertions
         np.testing.assert_allclose(result["backward"]["min"], [-0.47952273, -0.47531837, -0.2], atol=self.tolerance)
         np.testing.assert_allclose(result["backward"]["max"], [0.53531051, 0.61094195, 1.94740367], atol=self.tolerance)
         self.assertEqual(result["backward"]["shape"], (38400, 3))
 
-        if not self.skip_if_kit_108():
-            # Moved sphere assertions
-            np.testing.assert_allclose(result["moved"]["min"], [-0.69408685, -0.82115805, -0.2], atol=self.tolerance)
-            np.testing.assert_allclose(
-                result["moved"]["max"], [0.71303058, 0.66411346, 1.94949317], atol=self.tolerance
-            )
-            self.assertEqual(result["moved"]["shape"], (38400, 3))
+        # Moved sphere assertions
+        np.testing.assert_allclose(result["moved"]["min"], [-0.69408685, -0.82115805, -0.2], atol=self.tolerance)
+        np.testing.assert_allclose(result["moved"]["max"], [0.71303058, 0.66411346, 1.94949317], atol=self.tolerance)
+        self.assertEqual(result["moved"]["shape"], (38400, 3))
 
     async def test_streamlines_static_mixer_standard_with_colors(self):
         result = await self._streamlines_static_mixer("standard", use_colors=True)
@@ -229,33 +247,31 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
         np.testing.assert_allclose(result["backward"]["colors_max"], 307.960, atol=1e-3)
         self.assertEqual(result["backward"]["colors_shape"], (34724, 1))
 
-        if not self.skip_if_kit_108():
-            # Skip moved sphere assertions for Kit 108 since TramsformPrimSRT doesn't seem t have same effect.
-            # Moved sphere assertions
-            np.testing.assert_allclose(result["moved"]["min"], [-1.983881, -2.990228, -0.2], atol=self.tolerance)
-            np.testing.assert_allclose(result["moved"]["max"], [1.9660718, 2.9283297, 1.9999539], atol=self.tolerance)
-            self.assertEqual(result["moved"]["shape"], (31858, 3))
+        # Moved sphere assertions
+        np.testing.assert_allclose(result["moved"]["min"], [-1.983881, -2.990228, -0.2], atol=self.tolerance)
+        np.testing.assert_allclose(result["moved"]["max"], [1.9660718, 2.9283297, 1.9999539], atol=self.tolerance)
+        self.assertEqual(result["moved"]["shape"], (31858, 3))
 
-            # Color assertions for moved sphere
-            np.testing.assert_allclose(result["moved"]["colors_min"], [284.99997], atol=self.tolerance)
-            np.testing.assert_allclose(result["moved"]["colors_max"], [315.00027], atol=self.tolerance)
-            self.assertEqual(result["moved"]["colors_shape"], (31858, 1))
+        # Color assertions for moved sphere
+        np.testing.assert_allclose(result["moved"]["colors_min"], [284.99997], atol=self.tolerance)
+        np.testing.assert_allclose(result["moved"]["colors_max"], [315.00027], atol=self.tolerance)
+        self.assertEqual(result["moved"]["colors_shape"], (31858, 1))
 
     async def test_streamlines_static_mixer_nanovdb_with_colors(self):
         result = await self._streamlines_static_mixer("nanovdb", use_colors=True)
 
         # Points assertions (same as without colors)
         np.testing.assert_allclose(
-            result["forward"]["min"], [-0.19496827, -0.19781476, -2.01281691], atol=self.tolerance
+            result["forward"]["min"], [-0.19496827, -0.19781476, -2.01943183], atol=self.tolerance
         )
         np.testing.assert_allclose(result["forward"]["max"], [0.19890438, 0.19781476, 0.2], atol=self.tolerance)
-        self.assertEqual(result["forward"]["shape"], (38400, 3))
+        self.assertEqual(result["forward"]["shape"], (13218, 3))
 
         # Color assertions for forward direction
         self.assertIsNotNone(result["forward"].get("colors_min"))
-        self.assertAlmostEqual(result["forward"]["colors_min"][0], 285.0, places=3)
+        self.assertAlmostEqual(result["forward"]["colors_min"][0], 285.0234, places=3)
         self.assertAlmostEqual(result["forward"]["colors_max"][0], 300.4997, places=3)
-        self.assertEqual(result["forward"]["colors_shape"], (38400, 1))
+        self.assertEqual(result["forward"]["colors_shape"], (13218, 1))
 
     async def test_streamlines_static_mixer_standard_with_widths(self):
         async with new_stage() as stage:
@@ -265,12 +281,12 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
             dataset_path: str = f"{base_path}/B1_P3"
             viz_path: str = f"/World/CAE/Streamlines_B1_P3"
             sphere_path: str = f"/World/CAE/Sphere"
-            await execute_command(
-                "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="standard"
-            )
+            async with wait_for_operator_complete(viz_path, operator="Streamlines", allow_failure=True):
+                await execute_command(
+                    "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="standard"
+                )
             await execute_command("CreateCaeVizMeshPrim", prim_type="UnitSphere", prim_path=sphere_path)
             await execute_command("TransformPrimSRT", path=sphere_path, new_scale=[0.2, 0.2, 0.2])
-            await wait_for_update()
 
             viz_prim: Usd.Prim = stage.GetPrimAtPath(viz_path)
             sphere_prim: Usd.Prim = stage.GetPrimAtPath(sphere_path)
@@ -278,39 +294,38 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
             self.assertTrue(sphere_prim.IsValid())
 
             streamlines_api: cae_viz.StreamlinesAPI = cae_viz.StreamlinesAPI(viz_prim)
-            streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.forward)
 
             ds_api: cae_viz.DatasetSelectionAPI = cae_viz.DatasetSelectionAPI(viz_prim, "seeds")
-            ds_api.GetTargetRel().SetTargets({sphere_prim.GetPath()})
 
             vs_api = cae_viz.FieldSelectionAPI(viz_prim, "velocities")
-            vs_api.GetTargetRel().SetTargets(
-                [
-                    f"{base_path}/Flow_Solution/VelocityX",
-                    f"{base_path}/Flow_Solution/VelocityY",
-                    f"{base_path}/Flow_Solution/VelocityZ",
-                ]
-            )
 
             # first; pass constant width and confirm that's what we get.
-            streamlines_api.GetWidthAttr().Set(0.05)
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="Streamlines"):
+                streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.forward)
+                ds_api.GetTargetRel().SetTargets({sphere_prim.GetPath()})
+                _set_field_names(vs_api, "VelocityX", "VelocityY", "VelocityZ")
+                streamlines_api.GetWidthAttr().Set(0.05)
 
-            # Get forward direction points
-            usdrt_curves = UsdGeomRT.BasisCurves(usd_utils.get_prim_rt(viz_prim))
-            widths = get_vtrt_array_as_numpy(usdrt_curves.GetPrim().GetAttribute("primvars:widths"))
+            widths = read_rt_array(
+                self._get_rt_curves(viz_prim).GetPrim().GetAttribute("primvars:widths"),
+                "constant widths primvar",
+            )
             np.testing.assert_allclose(widths, 0.05, atol=self.tolerance)
 
             # now; pass field-specific width and confirm that's what we get.
             vs_api = cae_viz.FieldSelectionAPI(viz_prim, "widths")
-            vs_api.GetTargetRel().SetTargets([f"{base_path}/Flow_Solution/Temperature"])
 
             mapping_api = cae_viz.FieldMappingAPI(viz_prim, "widths")
-            mapping_api.GetRangeAttr().Set((0.045, 0.1))
 
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="Streamlines"):
+                _set_field_names(vs_api, "Temperature")
+                mapping_api.GetRangeAttr().Set((0.045, 0.1))
 
-            widths = get_vtrt_array_as_numpy(usdrt_curves.GetPrim().GetAttribute("primvars:widths"))
+            widths = read_rt_array(
+                self._get_rt_curves(viz_prim).GetPrim().GetAttribute("primvars:widths"),
+                "temperature widths primvar",
+            )
+            self.assertGreater(widths.max(), widths.min())
             self.assertTrue(widths.min() >= 0.045)
             self.assertTrue(widths.max() <= 0.1)
             self.assertAlmostEqual(widths.mean(), 0.072453074, places=3)
@@ -320,21 +335,28 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
             self.assertAlmostEqual(domain[1], 315.0, places=3)
 
             # change range and confirm that's what we get.
-            mapping_api.GetRangeAttr().Set((0.01, 0.05))
-            await wait_for_update()
-            widths = get_vtrt_array_as_numpy(usdrt_curves.GetPrim().GetAttribute("primvars:widths"))
+            async with wait_for_operator_complete(viz_path, operator="Streamlines"):
+                mapping_api.GetRangeAttr().Set((0.01, 0.05))
+            widths = read_rt_array(
+                self._get_rt_curves(viz_prim).GetPrim().GetAttribute("primvars:widths"),
+                "remapped widths primvar",
+            )
             self.assertTrue(widths.min() >= 0.01)
             self.assertTrue(widths.max() <= 0.05)
             self.assertAlmostEqual(widths.mean(), 0.02996587, places=3)
 
             # change array to Pres; drop rescale range and confirm that range remains unchanged.
             rescale_range_api = cae_viz.RescaleRangeAPI(viz_prim, "widths")
-            rescale_range_api.GetIncludesRel().SetTargets([])
 
-            vs_api.GetTargetRel().SetTargets([f"{base_path}/Flow_Solution/Pressure"])
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="Streamlines"):
+                rescale_range_api.GetIncludesRel().SetTargets([])
+                _set_field_names(vs_api, "Pressure")
 
-            widths = get_vtrt_array_as_numpy(usdrt_curves.GetPrim().GetAttribute("primvars:widths"))
+            widths = read_rt_array(
+                self._get_rt_curves(viz_prim).GetPrim().GetAttribute("primvars:widths"),
+                "pressure widths primvar",
+            )
+            self.assertGreater(widths.mean(), 0.035)
             self.assertTrue(widths.min() >= (0.01 - self.tolerance))
             self.assertTrue(widths.max() <= (0.05 + self.tolerance))
             self.assertAlmostEqual(widths.mean(), 0.042299, places=3)
@@ -354,16 +376,16 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
             sphere_path: str = f"/World/CAE/SphereOutside"
 
             # Create streamlines and sphere
-            await execute_command(
-                "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="standard"
-            )
+            async with wait_for_operator_complete(viz_path, operator="Streamlines", allow_failure=True):
+                await execute_command(
+                    "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="standard"
+                )
             await execute_command("CreateCaeVizMeshPrim", prim_type="UnitSphere", prim_path=sphere_path)
 
             # Move sphere far outside the dataset bounds
             await execute_command(
                 "TransformPrimSRT", path=sphere_path, new_translation=[100, 100, 100], new_scale=[0.2, 0.2, 0.2]
             )
-            await wait_for_update()
 
             viz_prim: Usd.Prim = stage.GetPrimAtPath(viz_path)
             sphere_prim: Usd.Prim = stage.GetPrimAtPath(sphere_path)
@@ -371,26 +393,19 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
             self.assertTrue(sphere_prim.IsValid())
 
             streamlines_api: cae_viz.StreamlinesAPI = cae_viz.StreamlinesAPI(viz_prim)
-            streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.forward)
 
             ds_api: cae_viz.DatasetSelectionAPI = cae_viz.DatasetSelectionAPI(viz_prim, "seeds")
-            ds_api.GetTargetRel().SetTargets({sphere_prim.GetPath()})
 
             vs_api = cae_viz.FieldSelectionAPI(viz_prim, "velocities")
-            vs_api.GetTargetRel().SetTargets(
-                [
-                    f"{base_path}/Flow_Solution/VelocityX",
-                    f"{base_path}/Flow_Solution/VelocityY",
-                    f"{base_path}/Flow_Solution/VelocityZ",
-                ]
-            )
 
             # This should complete without raising errors (though streamlines will be empty/invisible)
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="Streamlines", allow_failure=True):
+                streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.forward)
+                ds_api.GetTargetRel().SetTargets({sphere_prim.GetPath()})
+                _set_field_names(vs_api, "VelocityX", "VelocityY", "VelocityZ")
 
             # Verify the prim is still valid and invisible (since no streamlines were generated)
             usdrt_curves = UsdGeomRT.BasisCurves(usd_utils.get_prim_rt(viz_prim))
-            attr = usdrt_curves.GetVisibilityAttr()
             visibility = usdrt_curves.GetVisibilityAttr().Get()
             # When seeds are outside bounds, prim should be invisible due to QuietableException
             self.assertEqual(
@@ -422,18 +437,18 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
                 np.savez(f, coordinates=coords, velocity=velocity)
 
             try:
-                from omni.cae.importer.npz import import_to_stage as import_npz
+                from omni.cae.usd_plugins_importers import import_to_stage as import_npz
 
-                await import_npz(npz_path, "/World/PointCloud", schema_type="Point Cloud")
+                await import_npz(npz_path, "/World/PointCloud", schema="Point Cloud")
                 await wait_for_update()
 
-                dataset_path = "/World/PointCloud/NumPyDataSet"
+                dataset_path = "/World/PointCloud"
                 viz_path = "/World/CAE/Streamlines_PointCloud"
 
-                await execute_command(
-                    "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="nanovdb"
-                )
-                await wait_for_update()
+                async with wait_for_operator_complete(viz_path, operator="Streamlines", allow_failure=True):
+                    await execute_command(
+                        "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="nanovdb"
+                    )
 
                 viz_prim = stage.GetPrimAtPath(viz_path)
                 self.assertTrue(viz_prim.IsValid())
@@ -462,10 +477,10 @@ class TestStreamlines(omni.kit.test.AsyncTestCase):
             dataset_path = f"{base_path}/B1_P3"
             viz_path = "/World/CAE/Streamlines_Mesh"
 
-            await execute_command(
-                "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="nanovdb"
-            )
-            await wait_for_update()
+            async with wait_for_operator_complete(viz_path, operator="Streamlines", allow_failure=True):
+                await execute_command(
+                    "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=viz_path, type="nanovdb"
+                )
 
             viz_prim = stage.GetPrimAtPath(viz_path)
             self.assertTrue(viz_prim.IsValid())

@@ -56,3 +56,7 @@ data/*.usda
 
 # Format tool cache
 .lastformat
+
+# Native Python extension artifacts copied by local builds.
+source/extensions/omni.cae.core/python/_omni_cae_core*.so
+source/extensions/omni.cae.core/python/_omni_cae_core*.pyd

@@ -15,7 +15,7 @@ order = -100
 
 [package]
 title = "Omni CAE Schema"
-version = "1.6.0"  # Semantic Versionning is used: https://semver.org/
+version = "2.5.0"  # Semantic Versioning is used: https://semver.org/
 description = "Core USD schemas that define CAE data types, field arrays, and datasets for Omniverse."
 category = "internal"  # How to categorize this in the Extension Manager
 changelog = "docs/CHANGELOG.md"
@@ -25,7 +25,7 @@ readme  = "docs/README.md"  # Path (relative to the root) or content of readme m
 
 
 [dependencies]
-"omni.cae.algorithms.schema" = {}
+"omni.usd" = {}
 "omni.usd.libs" = {}
 
 
@@ -33,7 +33,7 @@ readme  = "docs/README.md"  # Path (relative to the root) or content of readme m
 name = "omni.cae.schema"
 
 [[python.module]]
-path = "usd/python"
+path = "lib/python"
 
 [documentation]
 pages = [
@@ -44,9 +44,7 @@ pages = [
 
 [[test]]
 dependencies = [
-    "omni.usd"
 ]
-
 
 args = [
 ]

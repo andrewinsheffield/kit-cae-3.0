@@ -10,11 +10,11 @@
 
 [package]
 # Semantic Versionning is used: https://semver.org/
-version = "1.5.1"
+version = "2.6.1"
 
 # The title and description fields are primarly for displaying extension info in UI
 title = "CAE Visualization"
-description = "Extension that provides CAE visualization algorithms and utilities using OmniCaeViz schemas."
+description = "Extension that provides CAE visualization operators and utilities using OmniCaeViz schemas."
 
 # Path (relative to the root) or content of readme markdown file for UI.
 readme  = "docs/README.md"
@@ -34,12 +34,12 @@ icon = "data/icon.png"
 
 [dependencies]
 "omni.usd" = {}
-"omni.cae.data" = {}
+"omni.cae.core" = {}
 "omni.cae.schema" = {}
-"omni.cae.dav" = {}
-"omni.cae.material_library" = {}
+"omni.cae.simdata" = {}
 "omni.kit.commands" = {}
 "omni.cae.index" = {}
+"omni.flowusd" = {}
 "omni.client" = {}
 "omni.ui" = {} # needed for ui.DynamicTextureProvider
 
@@ -69,11 +69,6 @@ pages = [
 
 [[test]]
 dependencies = [
-    "omni.cae.delegate.cgns",
-    "omni.cae.delegate.npz",
-    "omni.cae.delegate.vtk",
-    "omni.cae.importer.cgns",
-    "omni.cae.importer.npz",
-    "omni.cae.sids",
+    "omni.cae.usd_plugins_importers",
     "omni.cae.testing",
 ]

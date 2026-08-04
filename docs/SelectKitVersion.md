@@ -23,7 +23,7 @@ This displays a table of available Kit versions and prompts you to select one. Y
 
 ```sh
 # Select a specific version and generate files
-./repo.sh select_kit_version --version 108.0.0
+./repo.sh select_kit_version --version 110.1.2
 
 # Use default version and generate files
 ./repo.sh select_kit_version --default
@@ -52,7 +52,7 @@ Preview changes or validate existing files without modifying anything:
 ./repo.sh select_kit_version --dry-run
 
 # Preview what selecting a version would do
-./repo.sh select_kit_version --version 108.0.0 --dry-run
+./repo.sh select_kit_version --version 110.1.2 --dry-run
 
 # Preview what auto mode would do
 ./repo.sh select_kit_version --auto --dry-run
@@ -180,20 +180,21 @@ To add support for a new Kit SDK version, edit `tools/kit-versions.json`:
     ]
   },
   "versions": {
-    "109.0.1": {
+    "110.1.2": {
       "variables": {
-        "KIT_VERSION_TAG": "109.0.1+feature.252186.7a5e71a7",
-        "INDEX_HEADERS_TAG": "387500.2199"
+        "KIT_VERSION_TAG": "110.1.2+production",
+        "INDEX_HEADERS_TAG": "380600.2218",
+        "USD_VERSION_TAG": "0.25.11"
       },
       "templates": [
         {
-          "src": "${root}/templates/kit_cae/kit_cae_editor.kit",
-          "dest": "${root}/apps/kit_cae_editor.kit"
+          "src": "${root}/templates/110.1.2/kit_cae/kit_cae_editor.kit",
+          "dest": "${root}/source/apps/kit_cae_editor.kit"
         }
       ]
     }
   },
-  "default": "109.0.1"
+  "default": "110.1.2"
 }
 ```
 

@@ -10,12 +10,12 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.npz import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
-from pxr import Gf
+from pxr import Gf, UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
@@ -25,13 +25,16 @@ from pxr import Gf
 async def main():
     # 0. Import the NPZ file as a point cloud
     npz_path = get_test_data_path("disk_out_ref.npz")
-    await import_to_stage(npz_path, "/World/disk_out_ref_npz", schema_type="Point Cloud")
+    await import_to_stage(npz_path, "/World/disk_out_ref_npz", schema="Point Cloud")
 
     ctx = get_context()
     stage = ctx.get_stage()
 
+    # Create CAE anchor
+    UsdGeom.Xform.Define(stage, "/World/CAE")
+
     # 1. Generate the volume data
-    dataset_path = "/World/disk_out_ref_npz/NumPyDataSet"
+    dataset_path = "/World/disk_out_ref_npz"
     viz_path = "/World/CAE/Volume_NumPyDataSet"
     await execute_command("CreateCaeVizVolume", dataset_path=dataset_path, prim_path=viz_path, type="vdb")
 
@@ -40,7 +43,7 @@ async def main():
 
     assert viz_prim.HasAPI(cae_viz.FieldSelectionAPI, "colors"), "Should have FieldSelectionAPI for colors"
     colors_fs_api = cae_viz.FieldSelectionAPI(viz_prim, "colors")
-    colors_fs_api.CreateTargetRel().SetTargets(["/World/disk_out_ref_npz/NumPyArrays/Temp"])
+    colors_fs_api.CreateFieldNamesAttr().Set(["Temp"])
 
     # 3. Set the Gaussian Splatting parameters
     assert viz_prim.HasAPI(

@@ -398,6 +398,17 @@ class ChangeTracker:
             return set()
 
         properties = set(defn.GetPropertyNames())
+        if schema_name == "OmniSciArrayAPI":
+            # OmniSci array payloads are authored by convention as
+            # omni:sci:array:<instance>:value. The schema declares the descriptor
+            # fields, while file-format plugins author this payload attr lazily.
+            value_attr = "omni:sci:array:__INSTANCE_NAME__:value"
+            properties.add(value_attr)
+            logger.debug(
+                "[cae.viz.change_tracker] tracking schema=%s synthetic_property=%s",
+                schema_name,
+                value_attr,
+            )
         self._schema_properties_cache[schema_name] = properties
 
         # Also cache which properties are relationships
@@ -550,6 +561,13 @@ class ChangeTracker:
                                     target_prim, attr_name, visited, last_time_code, current_time_code
                                 ):
                                     self._debug_log("        -> Attribute changed!")
+                                    logger.debug(
+                                        "[cae.viz.change_tracker] relationship_changed prim=%s schema=%s rel=%s target_attr=%s",
+                                        prim_path_str,
+                                        applied_schema,
+                                        rel_name,
+                                        target_path,
+                                    )
                                     return True
                         elif target_path.IsPrimPath():
                             # Target is a prim - check if it changed (recursively)
@@ -561,6 +579,13 @@ class ChangeTracker:
                                     target_prim, None, visited, last_time_code, current_time_code
                                 ):
                                     self._debug_log("        -> Prim changed!")
+                                    logger.debug(
+                                        "[cae.viz.change_tracker] relationship_changed prim=%s schema=%s rel=%s target_prim=%s",
+                                        prim_path_str,
+                                        applied_schema,
+                                        rel_name,
+                                        target_path,
+                                    )
                                     return True
 
             self._debug_log("  %s: No relationship target changes found", prim.GetName())
@@ -851,9 +876,18 @@ class ChangeTracker:
                 if not matching_schemas:
                     continue
 
+                logger.debug(
+                    "[cae.viz.change_tracker] notice prim=%s properties=%s schemas=%s",
+                    prim_path_str,
+                    sorted(changed_property_names),
+                    matching_schemas,
+                )
+
                 # Ensure we have a changes dict for this prim
                 if prim_path_str not in self._prim_schema_changes:
                     self._prim_schema_changes[prim_path_str] = {}
+
+                matched_properties: Set[str] = set()
 
                 # Check each matching schema
                 for applied_schema in matching_schemas:
@@ -883,9 +917,25 @@ class ChangeTracker:
                                 self._prim_schema_changes[prim_path_str][schema_key] = {}
 
                             self._prim_schema_changes[prim_path_str][schema_key][property_name] = True
+                            matched_properties.add(property_name)
+                            logger.debug(
+                                "[cae.viz.change_tracker] tracked prim=%s schema=%s property=%s",
+                                prim_path_str,
+                                schema_key,
+                                property_name,
+                            )
                             self._debug_log(
                                 "Schema property changed: %s[%s].%s", prim_path_str, schema_key, property_name
                             )
+
+                unmatched_properties = sorted(changed_property_names - matched_properties)
+                if unmatched_properties:
+                    logger.debug(
+                        "[cae.viz.change_tracker] ignored prim=%s properties=%s schemas=%s",
+                        prim_path_str,
+                        unmatched_properties,
+                        matching_schemas,
+                    )
         except Exception as e:
             logger.error("Error in _on_objects_changed: %s", e, exc_info=True)
 
@@ -950,11 +1000,19 @@ class ChangeTracker:
             # If treating all as initially dirty and this prim hasn't been cleared yet, return True
             if self._treat_all_as_initially_dirty:
                 self._debug_log("  %s treated as initially dirty", prim.GetName())
+                logger.debug(
+                    "[cae.viz.change_tracker] prim_changed prim=%s result=true reason=initial",
+                    prim_path_str,
+                )
                 return True
 
             # Check if this prim or any ancestor was resynced (entire subtree is dirty)
             if self._has_resynced_ancestor(prim_path):
                 self._debug_log("  %s has resynced ancestor", prim.GetName())
+                logger.debug(
+                    "[cae.viz.change_tracker] prim_changed prim=%s result=true reason=resync",
+                    prim_path_str,
+                )
                 return True
 
             # Check detailed property changes
@@ -971,6 +1029,11 @@ class ChangeTracker:
             for schema_changes in prim_changes.values():
                 if schema_changes:  # If any property changed in this schema
                     self._debug_log("  %s: Found direct property changes", prim.GetName())
+                    logger.debug(
+                        "[cae.viz.change_tracker] prim_changed prim=%s result=true reason=direct changes=%s",
+                        prim_path_str,
+                        prim_changes,
+                    )
                     return True
             # Don't return False yet - check relationships below
             self._debug_log("  %s: No direct changes, checking relationships...", prim.GetName())
@@ -981,6 +1044,12 @@ class ChangeTracker:
                 # Check exact match first (with instance name if provided)
                 if schema in prim_changes and prim_changes[schema]:
                     self._debug_log("  %s: Found changes in %s", prim.GetName(), schema)
+                    logger.debug(
+                        "[cae.viz.change_tracker] prim_changed prim=%s result=true reason=direct schema=%s changes=%s",
+                        prim_path_str,
+                        schema,
+                        prim_changes[schema],
+                    )
                     return True
 
                 # If no instance name, check all instances of this schema
@@ -989,6 +1058,12 @@ class ChangeTracker:
                         base_schema = tracked_schema.split(":")[0]
                         if base_schema == schema and prim_changes[tracked_schema]:
                             self._debug_log("  %s: Found changes in %s", prim.GetName(), tracked_schema)
+                            logger.debug(
+                                "[cae.viz.change_tracker] prim_changed prim=%s result=true reason=direct schema=%s changes=%s",
+                                prim_path_str,
+                                tracked_schema,
+                                prim_changes[tracked_schema],
+                            )
                             return True
             self._debug_log("  %s: No direct schema changes, checking relationships...", prim.GetName())
 
@@ -996,6 +1071,10 @@ class ChangeTracker:
         self._debug_log("  %s: Calling _check_relationship_targets_changed", prim.GetName())
         if self._check_relationship_targets_changed(prim, schemas, visited, last_time_code, current_time_code):
             self._debug_log("  %s: Relationship targets changed!", prim.GetName())
+            logger.debug(
+                "[cae.viz.change_tracker] prim_changed prim=%s result=true reason=relationship",
+                prim_path_str,
+            )
             return True
 
         self._debug_log("  %s: No changes found", prim.GetName())

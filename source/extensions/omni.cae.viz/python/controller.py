@@ -15,17 +15,24 @@ The controller is responsible for managing operator lifecycle, tracking changes,
 and executing operators based on USD stage state.
 """
 
-__all__ = ["Controller"]
+__all__ = [
+    "Controller",
+    "EVT_SYNC_BEGIN",
+    "EVT_SYNC_END",
+    "EVT_OPERATOR_BEGIN",
+    "EVT_OPERATOR_END",
+    "EVT_OPERATOR_COMPLETE",
+]
 
 import logging
 import weakref
-from typing import Any, ClassVar, Iterator
+from typing import Any, ClassVar, Iterator, NamedTuple
 
-import dav
 import omni.kit.app
 import omni.timeline
 import omni.usd
-from omni.cae.data import usd_utils
+import warp_simdata as simdata
+from omni.cae.core import progress, usd_utils
 from omni.cae.schema import viz as cae_viz
 from pxr import Usd, UsdGeom, UsdUtils
 from usdrt import Rt
@@ -39,11 +46,46 @@ from .operator import get_operators
 
 logger = logging.getLogger(__name__)
 
-# Notification event names (base name — queue_event also dispatches "<name>:immediate")
+# Notification event names.
+#
+# omni.kit.app.queue_event dispatches each event twice:
+# - an immediate event named "<event>:immediate" while queue_event() is called
+# - a deferred event named "<event>" on the next app update
+#
+# EVT_SYNC_BEGIN / EVT_SYNC_END describe a full controller sync pass over the
+# current stage. They are useful for diagnostics and coarse "sync is idle"
+# barriers, but they do not identify a particular operator output.
+#
+# EVT_OPERATOR_BEGIN is emitted just before an operator prim begins execution.
+# EVT_OPERATOR_END is emitted after the operator body returns or fails, before
+# controller-side post-processing such as visibility and tracker cleanup.
+#
+# EVT_OPERATOR_COMPLETE is emitted after the operator body and controller
+# post-processing have finished. Tests that need to read externally visible
+# operator outputs should wait for EVT_OPERATOR_COMPLETE, not EVT_OPERATOR_END.
 EVT_SYNC_BEGIN = "omni.cae.viz@sync_begin"
 EVT_SYNC_END = "omni.cae.viz@sync_end"
 EVT_OPERATOR_BEGIN = "omni.cae.viz@operator_begin"
 EVT_OPERATOR_END = "omni.cae.viz@operator_end"
+EVT_OPERATOR_COMPLETE = "omni.cae.viz@operator_complete"
+
+
+class _RoiTransformDependencySpec(NamedTuple):
+    """Describes a schema relationship whose target prim transform affects execution.
+
+    Keep these specs declarative so future generated schema metadata can extend the
+    dependency list without changing the traversal logic.
+    """
+
+    schema_name: str
+    api_type: Any
+    relationship_getter_name: str
+
+
+_ROI_TRANSFORM_DEPENDENCY_SPECS: tuple[_RoiTransformDependencySpec, ...] = (
+    _RoiTransformDependencySpec("CaeVizDatasetSubsetAPI", cae_viz.DatasetSubsetAPI, "GetRoiRel"),
+    _RoiTransformDependencySpec("CaeVizDatasetVoxelizationAPI", cae_viz.DatasetVoxelizationAPI, "GetRoiRel"),
+)
 
 
 class Controller:
@@ -66,12 +108,12 @@ class Controller:
         Change tracker for monitoring schema property changes
     """
 
-    _schema_regexs: ClassVar[list[str]] = [r"^Cae"]
+    _schema_regexs: ClassVar[list[str]] = [r"^Cae", r"^OmniSci", r"^OmniCgns"]
     _instances: ClassVar[weakref.WeakValueDictionary] = weakref.WeakValueDictionary()
 
     def __new__(cls, stageId: int):
         existing = cls._instances.get(stageId)
-        if existing is not None:
+        if existing is not None and not getattr(existing, "_closed", False):
             return existing
         instance = super().__new__(cls)
         cls._instances[stageId] = instance
@@ -120,10 +162,12 @@ class Controller:
         stageId : int
             The stage ID from UsdUtils.StageCache
         """
-        if hasattr(self, "_stage"):
+        if hasattr(self, "_stage") and not getattr(self, "_closed", False):
             return  # Already initialized for this stageId
 
         # Get the stage from the cache
+        self._stage_id = stageId
+        self._closed = False
         cache = UsdUtils.StageCache.Get()
         stage_cache_id = cache.Id.FromLongInt(stageId)
         self._stage: Usd.Stage = cache.Find(stage_cache_id)
@@ -143,8 +187,31 @@ class Controller:
 
     def __del__(self):
         """Cleanup resources."""
+        self.close()
+
+    def close(self):
+        """Mark this controller inactive so in-flight async work stops using its stage."""
+        self._closed = True
         if hasattr(self, "_tracker") and self._tracker:
             self._tracker.disable()
+            self._tracker = None
+
+    def _is_current_stage(self) -> bool:
+        if self._closed:
+            return False
+        try:
+            return omni.usd.get_context().get_stage_id() == self._stage_id
+        except Exception:
+            return False
+
+    def _prim_is_usable(self, prim: Usd.Prim) -> bool:
+        if not self._is_current_stage() or not prim:
+            return False
+        try:
+            return prim.IsValid() and prim.IsActive()
+        except RuntimeError as exc:
+            logger.warning("Skipping operator work for expired prim: %s", exc)
+            return False
 
     async def sync(self, timecode: Usd.TimeCode) -> bool:
         """
@@ -164,8 +231,10 @@ class Controller:
         bool
             True if any operators were executed, False otherwise
         """
+        if not self._is_current_stage():
+            return False
+
         # Find all prims with the CaeVizOperatorAPI schema
-        assert self._stage_rt is not None
         operator_prim_paths = self._stage_rt.GetPrimsWithAppliedAPIName("CaeVizOperatorAPI")
         updated = False
 
@@ -182,7 +251,11 @@ class Controller:
             while pass_count < 3 and operator_prim_paths:
                 updated_this_pass = False
                 for operator_prim_path in operator_prim_paths:
+                    if not self._is_current_stage():
+                        return updated
                     prim = self._stage.GetPrimAtPath(str(operator_prim_path))
+                    if not self._prim_is_usable(prim):
+                        continue
                     cae_operator_api = cae_viz.OperatorAPI(prim)
                     if not cae_operator_api.GetEnabledAttr().Get(timecode):
                         continue
@@ -211,15 +284,17 @@ class Controller:
         # unless user changes something again, we don't want to keep retrying since
         # the same error will likely occur again. So clearing all changes here
         # makes sense.
-        self._tracker.clear_all_changes()
-        self._xform_change_tracker.ClearChanges()
+        if self._is_current_stage():
+            if self._tracker:
+                self._tracker.clear_all_changes()
+            self._xform_change_tracker.ClearChanges()
         return updated
 
     async def _execute_operator(self, prim: Usd.Prim, timecode: Usd.TimeCode, device: str):
         """
         Execute the operator for the given prim at the given timecode.
         """
-        if not prim or not prim.IsActive():
+        if not self._prim_is_usable(prim):
             return False
 
         if (
@@ -266,27 +341,57 @@ class Controller:
         execution_contexts = list(self._build_execution_context(prim, operator_class, timecode, device, last_execution))
 
         if not execution_contexts:
+            logger.debug(
+                "[cae.viz.controller][time] skip prim=%s raw=%s last_time=%s last_raw=%s operator=%s",
+                prim.GetPath(),
+                timecode,
+                last_execution["timecode"],
+                last_execution.get("raw_timecode"),
+                operator_class.__name__,
+            )
             return False  # Skip execution
 
-        dav_enable_timing = None
+        simdata_enable_timing = None
         if prim.HasAPI(cae_viz.OperatorDebuggingAPI):
             operator_debugging_api = cae_viz.OperatorDebuggingAPI(prim)
             if operator_debugging_api.GetEnableTimingAttr().Get():
-                dav_enable_timing = True
+                simdata_enable_timing = True
             else:
-                dav_enable_timing = False
+                simdata_enable_timing = False
 
         operator_instance = operator_class()
 
-        if dav_enable_timing is not None:
-            dav.config.enable_timing = dav_enable_timing
+        if simdata_enable_timing is not None:
+            simdata.config.enable_timing = simdata_enable_timing
 
         last_successful = False
+        last_execution_context = None
+
+        def _operator_event_payload(*, include_success: bool = True) -> dict:
+            payload = {
+                "prim_path": prim_path_str,
+                "operator": operator_class.__name__,
+                "stage_id": self._stage_id,
+            }
+            if include_success:
+                payload["success"] = last_successful
+            if last_execution_context is not None:
+                payload.update(
+                    {
+                        "timecode": last_execution_context.timecode.GetValue(),
+                        "raw_timecode": last_execution_context.raw_timecode.GetValue(),
+                        "reason": last_execution_context.reason.value,
+                    }
+                )
+            return payload
 
         # Execute each yielded context
-        omni.kit.app.queue_event(EVT_OPERATOR_BEGIN, {"prim_path": prim_path_str})
+        omni.kit.app.queue_event(EVT_OPERATOR_BEGIN, _operator_event_payload(include_success=False))
         try:
             for execution_context in execution_contexts:
+                last_execution_context = execution_context
+                if not self._prim_is_usable(prim):
+                    break
                 try:
                     logger.info(
                         "Executing operator %s for prim %s at %s [device=%s, reason=%s]",
@@ -311,8 +416,11 @@ class Controller:
                             )
                     else:
                         # Normal execution
-                        await operator_instance.exec(prim, device, execution_context)
+                        with progress.ProgressContext(f"Executing {operator_class.__name__} ..."):
+                            await operator_instance.exec(prim, device, execution_context)
 
+                    if not self._prim_is_usable(prim):
+                        break
                     last_successful = True
 
                 except NotImplementedError as e:
@@ -346,16 +454,16 @@ class Controller:
                         "temporal_state": last_execution["temporal_state"],  # Preserve temporal state
                     }
         finally:
-            omni.kit.app.queue_event(EVT_OPERATOR_END, {"prim_path": prim_path_str, "success": last_successful})
+            omni.kit.app.queue_event(EVT_OPERATOR_END, _operator_event_payload())
 
         # Cleanup after all contexts processed
-        if dav_enable_timing is not None:
-            dav.config.enable_timing = False
+        if simdata_enable_timing is not None:
+            simdata.config.enable_timing = False
 
         if last_successful:
             # if operator succeeded, set prim visibility to inherited
             logger.info("post-exec: %s", operator_instance.__class__.__name__)
-        else:
+        elif self._prim_is_usable(prim):
             # Deactivate the operator on error
             try:
                 operator_instance.deactivate(prim) if hasattr(operator_instance, "deactivate") else None
@@ -363,14 +471,16 @@ class Controller:
                 logger.warning(f"Error deactivating operator {operator_class.__name__}: {deactivate_error}")
 
         # Set prim visibility to inherited if operator succeeded, otherwise invisible
-        if prim and prim.IsA(UsdGeom.Imageable):
+        if self._prim_is_usable(prim) and prim.IsA(UsdGeom.Imageable):
             prim_rt = UsdGeomRT.Imageable(usd_utils.get_prim_rt(prim))
             prim_rt.CreateVisibilityAttr().Set(
                 UsdGeomRT.Tokens.inherited if last_successful else UsdGeomRT.Tokens.invisible
             )
 
         del operator_instance
-        self._tracker.clear_changes(prim)
+        if self._prim_is_usable(prim) and self._tracker:
+            self._tracker.clear_changes(prim)
+        omni.kit.app.queue_event(EVT_OPERATOR_COMPLETE, _operator_event_payload())
         return last_successful
 
     def _build_execution_context(
@@ -430,18 +540,20 @@ class Controller:
             current_time_code = Usd.TimeCode.EarliestTime()
             next_time_code = None
 
+        selected_targets = []
+        for instance_name in usd_utils.get_instances(prim, "CaeVizDatasetSelectionAPI"):
+            ds_api = cae_viz.DatasetSelectionAPI(prim, instance_name)
+            targets = [str(target) for target in ds_api.GetTargetRel().GetForwardedTargets()]
+            selected_targets.append(f"{instance_name}={targets}")
+
         # Check basic conditions that force execution
-        structural_change = (
-            last_execution["operator_class"] != operator_class
-            or last_execution["device"] != device
-            or self._has_data_selection_transform_changed(prim)
-        )
-        structural_change = structural_change or self._tracker.prim_changed(
-            prim
-        )  # if prim change for non-temporal reasons.
+        operator_changed = last_execution["operator_class"] != operator_class
+        device_changed = last_execution["device"] != device
+        transform_changed = self._has_transform_dependency_changed(prim)
+        tracker_changed = self._tracker.prim_changed(prim)
+        structural_change = operator_changed or device_changed or transform_changed or tracker_changed
 
         supports_temporal = getattr(operator_class, "__supports_temporal__", False)
-        logger.debug(f"[TEMPORAL DEBUG] {prim.GetPath()}: supports_temporal={supports_temporal}")
 
         enable_field_interpolation = (
             prim.HasAPI(cae_viz.OperatorTemporalAPI)
@@ -451,10 +563,43 @@ class Controller:
             # if field interpolation is not enabled, we don't need to process next time code
             next_time_code = None
 
+        logger.debug(
+            "[cae.viz.controller][time] prim=%s op=%s raw=%s lower=%s upper=%s has_samples=%s "
+            "current=%s next=%s targets=%s structural=%s "
+            "(operator=%s device=%s xform=%s tracker=%s) supports_temporal=%s interp=%s "
+            "last_time=%s last_raw=%s temporal_state=%s",
+            prim.GetPath(),
+            operator_class.__name__,
+            raw_timecode,
+            lower,
+            upper,
+            has_time_samples,
+            current_time_code,
+            next_time_code,
+            ";".join(selected_targets),
+            structural_change,
+            operator_changed,
+            device_changed,
+            transform_changed,
+            tracker_changed,
+            supports_temporal,
+            enable_field_interpolation,
+            last_execution["timecode"],
+            last_execution.get("raw_timecode"),
+            last_execution.get("temporal_state"),
+        )
+
         executed = False
 
         if structural_change:
             last_execution["temporal_state"] = {"executed_timecodes": {current_time_code.GetValue()}}
+            logger.debug(
+                "[cae.viz.controller][time] yield prim=%s reason=structural time=%s raw=%s next=%s",
+                prim.GetPath(),
+                current_time_code,
+                raw_timecode,
+                next_time_code,
+            )
             yield ExecutionContext(
                 reason=ExecutionReason.STRUCTURAL_CHANGE,
                 timecode=current_time_code,
@@ -473,13 +618,35 @@ class Controller:
 
             if current_time_code.GetValue() not in temporal_state["executed_timecodes"]:
                 timecode_to_execute.append((0, current_time_code))  # timestep_index=0 for t0
+            else:
+                logger.debug(
+                    "[cae.viz.controller][time] already-executed prim=%s time=%s executed=%s",
+                    prim.GetPath(),
+                    current_time_code,
+                    sorted(temporal_state["executed_timecodes"]),
+                )
 
             if enable_field_interpolation and next_time_code:
                 if next_time_code.GetValue() not in temporal_state["executed_timecodes"]:
                     timecode_to_execute.append((1, next_time_code))  # timestep_index=1 for t0+1
+                else:
+                    logger.debug(
+                        "[cae.viz.controller][time] already-executed-next prim=%s time=%s executed=%s",
+                        prim.GetPath(),
+                        next_time_code,
+                        sorted(temporal_state["executed_timecodes"]),
+                    )
 
             for timestep_idx, timecode in timecode_to_execute:
                 temporal_state["executed_timecodes"].add(timecode.GetValue())
+                logger.debug(
+                    "[cae.viz.controller][time] yield prim=%s reason=temporal time=%s raw=%s next=%s step=%s",
+                    prim.GetPath(),
+                    timecode,
+                    raw_timecode,
+                    next_time_code,
+                    timestep_idx,
+                )
                 yield ExecutionContext(
                     reason=ExecutionReason.TEMPORAL_UPDATE,
                     timecode=timecode,
@@ -496,6 +663,13 @@ class Controller:
             if current_time_code.GetValue() not in temporal_state["executed_timecodes"]:
                 temporal_state["executed_timecodes"].clear()
                 temporal_state["executed_timecodes"].add(current_time_code.GetValue())
+                logger.debug(
+                    "[cae.viz.controller][time] yield prim=%s reason=non-temporal-time time=%s raw=%s next=%s",
+                    prim.GetPath(),
+                    current_time_code,
+                    raw_timecode,
+                    next_time_code,
+                )
                 yield ExecutionContext(
                     reason=ExecutionReason.TEMPORAL_UPDATE,  # Still a time-based update
                     timecode=current_time_code,
@@ -505,6 +679,13 @@ class Controller:
                     timestep_index=0,
                 )
                 executed = True
+            else:
+                logger.debug(
+                    "[cae.viz.controller][time] non-temporal same snapped time prim=%s time=%s executed=%s",
+                    prim.GetPath(),
+                    current_time_code,
+                    sorted(temporal_state["executed_timecodes"]),
+                )
 
         # Check if we need to yield tick
         tick_on_time_change = getattr(operator_class, "__tick_on_time_change__", False)
@@ -520,7 +701,14 @@ class Controller:
                 needs_tick = executed or (current_time_code.GetValue() != last_execution["timecode"].GetValue())
 
             if needs_tick:
-                logger.debug(f"Temporal tick for {prim.GetPath()} at raw={raw_timecode}, snapped={current_time_code}")
+                logger.debug(
+                    "[cae.viz.controller][time] yield prim=%s reason=tick time=%s raw=%s next=%s executed=%s",
+                    prim.GetPath(),
+                    current_time_code,
+                    raw_timecode,
+                    next_time_code,
+                    executed,
+                )
                 yield ExecutionContext(
                     reason=ExecutionReason.TEMPORAL_TICK,
                     timecode=current_time_code,
@@ -539,6 +727,17 @@ class Controller:
                 if operator_class.api_schemas.issubset(set(prim.GetAppliedSchemas())):
                     return operator_class
         return None
+
+    def _has_transform_dependency_changed(self, prim: Usd.Prim) -> bool:
+        """
+        Return True when a transform dependency that feeds this operator has changed.
+
+        Dataset transforms and ROI prim bounds are represented differently in USD,
+        but both affect the input data an operator consumes. Keeping the specialized
+        checks behind this single predicate makes it straightforward to add generated
+        dependency specs later.
+        """
+        return self._has_data_selection_transform_changed(prim) or self._has_roi_transform_changed(prim)
 
     def _has_data_selection_transform_changed(self, prim: Usd.Prim) -> bool:
         """
@@ -563,6 +762,26 @@ class Controller:
             elif prim.HasAPI(cae_viz.DatasetSelectionAPI, instance_name):
                 ds_api = cae_viz.DatasetSelectionAPI(prim, instance_name)
                 for target in ds_api.GetTargetRel().GetForwardedTargets():
+                    attr_path = target.AppendProperty(attr_name)
+                    if self._xform_change_tracker.AttributeChanged(str(attr_path)):
+                        return True
+        return False
+
+    def _has_roi_transform_changed(self, prim: Usd.Prim) -> bool:
+        """
+        Return True if any ROI prim targeted by a dataset pipeline API has moved.
+
+        Subset and voxelization pipeline stages derive their working bounds from
+        an ROI relationship. If that target prim's world transform changes, the
+        selected/voxelized dataset can change even though no property on the
+        operator prim changed.
+        """
+        attr_name = "omni:fabric:worldMatrix"
+        for spec in _ROI_TRANSFORM_DEPENDENCY_SPECS:
+            for instance_name in usd_utils.get_instances(prim, spec.schema_name):
+                api = spec.api_type(prim, instance_name)
+                rel = getattr(api, spec.relationship_getter_name)()
+                for target in rel.GetForwardedTargets():
                     attr_path = target.AppendProperty(attr_name)
                     if self._xform_change_tracker.AttributeChanged(str(attr_path)):
                         return True

@@ -10,16 +10,16 @@
 
 from logging import getLogger
 
-import dav
 import numpy as np
-import omni.cae.dav as cae_dav
-from dav.operators import streamlines as dav_streamlines
-from omni.cae.data import progress, usd_utils
+import omni.cae.simdata as cae_simdata
+import warp_simdata as simdata
+from omni.cae.core import progress, usd_utils
 from omni.cae.schema import viz as cae_viz
 from pxr import Usd
 from usdrt import Sdf as SdfRT
 from usdrt import UsdGeom as UsdGeomRT
 from usdrt import Vt as VtRT
+from warp_simdata.operators import streamlines as simdata_streamlines
 
 from . import utils as viz_utils
 from .execution_context import ExecutionContext
@@ -50,14 +50,14 @@ class Streamlines:
         prim_rt = UsdGeomRT.BasisCurves(usd_utils.get_prim_rt(prim))
         prim_rt.CreateVisibilityAttr().Set(UsdGeomRT.Tokens.invisible)
 
-    async def get_source(self, prim: Usd.Prim, timeCode: Usd.TimeCode, device: str) -> dav.Dataset:
+    async def get_source(self, prim: Usd.Prim, timeCode: Usd.TimeCode, device: str) -> simdata.Dataset:
         return await viz_utils.get_input_dataset(
             prim, "source", timeCode=timeCode, device=device, required_fields=["velocities"]
         )
 
     async def exec(self, prim: Usd.Prim, device: str, context: ExecutionContext):
-        # dav.config.enable_timing = True
-        with dav.scoped_timer("prepare_input"):
+        # simdata.config.enable_timing = True
+        with simdata.scoped_timer("prepare_input"):
             seeds_dataset = await viz_utils.get_input_dataset(
                 prim,
                 "seeds",
@@ -69,14 +69,14 @@ class Streamlines:
             source_dataset = await self.get_source(prim, context.timecode, device)
 
         # validate source dataset
-        if not dav.utils.is_vector_dtype(source_dataset.get_field("velocities").dtype):
+        if not simdata.utils.is_vector_dtype(source_dataset.get_field("velocities").dtype):
             raise ValueError(
                 "Velocities field must be a vector field. Got {source_dataset.get_field('velocities').dtype}"
             )
 
         streamlines_api = cae_viz.StreamlinesAPI(prim)
-        with progress.ProgressContext("Executing DAV [streamlines]"):
-            result = dav_streamlines.compute(
+        with progress.ProgressContext("Executing SimData [streamlines]"):
+            result = simdata_streamlines.compute(
                 source_dataset,
                 "velocities",
                 seeds_dataset,
@@ -89,11 +89,11 @@ class Streamlines:
                 # threshold=streamlines_api.GetThresholdAttr().Get(),
             )
 
-        if result is None or result.get_num_points() == 0:
+        if result is None or result.get_num_nodes() == 0:
             raise usd_utils.QuietableException("No streamlines generated")
 
-        with dav.scoped_timer("probe_fields"):
-            result = cae_dav.probe_fields(source_dataset, result, exclude_fields={"velocities"})
+        with simdata.scoped_timer("probe_fields"):
+            result = cae_simdata.probe_fields(source_dataset, result, exclude_fields={"velocities"})
 
         # Populate USD basis curves prim
         prim_rt = UsdGeomRT.BasisCurves(usd_utils.get_prim_rt(prim))
@@ -117,5 +117,5 @@ class Streamlines:
 
         # process widths
         viz_utils.process_widths(prim, result, fixed_width=streamlines_api.GetWidthAttr().Get())
-        # dav.config.enable_timing = False
+        # simdata.config.enable_timing = False
         prim_rt.CreateVisibilityAttr().Set(UsdGeomRT.Tokens.inherited)

@@ -1,96 +1,48 @@
 # Format Reference
 
-Stage paths are *illustrative* — always inspect or use stage discovery for your data.
-
-## CGNS (.cgns)
-
-**Kit:** `omni.cae.kit` | **Import:** `from omni.cae.importer.cgns import import_to_stage`
+All active formats use:
 
 ```python
-await import_to_stage(path, prim_path, time_scale=1.0, time_offset=0.0, time_source="TimeStep")
+from omni.cae.usd_plugins_importers import import_to_stage
+
+root = await import_to_stage(path, prim_path, **format_args)
 ```
 
-`time_source`: `"TimeStep"` (index) or `"TimeValue"` (simulation time).
+The destination is a payload prim. The source file-format plugin determines the
+children below it, so stage paths vary with the source hierarchy. Always inspect
+the resulting `OmniSciDataset` prims and their `OmniSciFieldAPI` instances.
 
-**Stage:** `/World/<root>/Base/<Zone>/{GridCoordinates|<MeshBlock>|<FlowSolution>/<Field>}`
+| Format | Extensions | Typed argument API | Notes |
+|---|---|---|---|
+| CGNS | `.cgns` | `OmniSciFileFormatArgsCgnsAPI` | Supports time mapping and optional base/zone filters. |
+| EDEM | `.dem` | `OmniSciFileFormatArgsEdemAPI` | Particle datasets; supports time and streaming arguments. |
+| EnSight Gold | `.case`, `.encas` | `OmniSciFileFormatArgsEnSightAPI` | Supports time and streaming arguments. |
+| FLASH AMR | `.flash` | `OmniSciFileFormatArgsFlashAPI` | Experimental axisymmetric support in Kit-CAE. |
+| EGRID | `.egrid` | `OmniSciFileFormatArgsEgridAPI` | Eclipse reservoir grid. |
+| GRDECL | `.grdecl`, `.data` | `OmniSciFileFormatArgsGrdeclAPI` | Eclipse text-deck grid. |
+| INIT | `.init` | `OmniSciFileFormatArgsInitAPI` | Reservoir properties; may reference a companion grid. |
+| UNRST | `.unrst` | `OmniSciFileFormatArgsUnrstAPI` | Time-varying reservoir results. |
+| NumPy | `.npz`, `.npy` | `OmniSciFileFormatArgsNpzAPI`, `OmniSciFileFormatArgsNpyAPI` | NPZ can be interpreted as `Point Cloud`, `CGNS`, or `None`. |
+| NanoVDB | `.nvdb` | `OmniSciFileFormatArgsPythonAPI` | Python-backed format plugin. |
+| OpenFOAM | `.foam` | `OmniSciFileFormatArgsOpenFoamAPI` | Place an empty `.foam` marker in the case root when needed. |
+| VTK | `.vtk`, `.vti`, `.vtr`, `.vts`, `.vtp`, `.vtu` | `OmniSciFileFormatArgsVtkAPI` | Native USD-plugin path does not use a VTK Data Delegate. |
+| Trimesh | `.stl`, `.ply`, `.3mf` | `OmniSciFileFormatArgsPythonAPI` | Deliberately limited to these three extensions. |
 
-**Name sanitization:** dots/spaces → underscores (`B1.P3` → `B1_P3`).
+## Shared arguments
 
-**Velocity naming:** varies by solver — `VelocityX/Y/Z`, `Velocity_0/1/2`, `U/V/W`. Never hardcode.
+- `cacheMode`: `all`, `static`, or `none`.
+- `scale`, `offset`, `source`: time mapping for formats that apply the time API.
+- `chunkSize`, `ioThreads`: streaming hints for formats that apply the streaming API.
 
-**Inspect:** `CAE_INSPECT_FILE=<f> ./repo.sh launch -n omni.cae.kit -- --exec skills/cae-core/scripts/inspect_cgns.py --no-window`
-
----
-
-## VTK (.vti .vtu .vts .vtp .vtk)
-
-**Kit:** `omni.cae_vtk.kit` | **Import:** `from omni.cae.importer.vtk import import_to_stage`
+Examples:
 
 ```python
-await import_to_stage(path, prim_path)
+await import_to_stage(cgns_path, "/World/CGNS", source="TimeValue")
+await import_to_stage(npz_path, "/World/Cloud", schema="Point Cloud")
+await import_to_stage(npz_path, "/World/Mesh", schema="CGNS")
 ```
 
-**Requires:** `./repo.sh pip_download`
+Use `usd_utils.get_instances(dataset_prim, "OmniSciFieldAPI")` to discover
+field instance names. Never infer fields solely from a remembered stage path.
 
-**Stage:** `/World/<name>/VTK{ImageData|UnstructuredGrid|StructuredGrid|PolyData}`
-Fields: `/World/<name>/{PointData|CellData}/<Field>`
-
-**Inspect:** `CAE_INSPECT_FILE=<f> ./repo.sh launch -n omni.cae_vtk.kit -- --exec skills/cae-core/scripts/inspect_vtk.py --no-window`
-
----
-
-## EnSight Gold (.case .encas)
-
-**Kit:** `omni.cae.kit` | **Import:** `from omni.cae.importer.ensight import import_to_stage`
-
-```python
-await import_to_stage(path, prim_path, time_scale=1.0, time_offset=0.0)
-```
-
-**Stage:** `/World/<name>/VTK_Part/Variables/<Field>`. Multi-part: `VTK_Part_<N>`.
-
-**⚠** `CreateCaeVizFaces` `external_only` unsupported for volumetric parts.
-
----
-
-## OpenFOAM (.foam)
-
-**Kit:** `omni.cae.kit` | No scripted `import_to_stage` — UI only (File > Import).
-
-**Stage:** `/World/<case>/{Volume|boundaries/<patch>|internalFields/<f>}`
-
-Create empty `.foam` file in case root if needed.
-
----
-
-## NumPy (.npz .npy)
-
-**Kit:** `omni.cae.kit` | **Import:** `from omni.cae.importer.npz import import_to_stage`
-
-```python
-await import_to_stage(path, prim_path, schema_type="SIDS Unstructured")
-# schema_type: "SIDS Unstructured" (mesh) or "Point Cloud"
-```
-
-**Stage:** Dataset at `/World/<name>/NumPyDataSet`, fields at `/World/<name>/NumPyArrays/<Array>`.
-
-**⚠ SIDS Unstructured requires field association fix** (see `kit-cae-api.md`).
-
-**Volume type:** Use `type="irregular"` for NPZ with cell connectivity (`element_connectivity` array), `type="vdb"` for point clouds without topology.
-
-**Field naming:** Array names from the NPZ file are used directly (e.g., `Temp`, `V`, `Pres`). Never assume field names — always discover via USDRT.
-
----
-
-## EDEM (.dem)
-
-**Kit:** `omni.cae.kit` + `--enable omni.cae.delegate.edem --enable omni.cae.importer.edem`
-
-Not bundled by default. Uses asset importer API.
-
----
-
-## Custom Formats
-
-4-layer architecture: Schema → Delegate → Importer → API Schema.
-See `extensibility.md` or `docs/FormatOnboarding.md`.
+For a new format, follow `docs/FormatOnboarding.md`.

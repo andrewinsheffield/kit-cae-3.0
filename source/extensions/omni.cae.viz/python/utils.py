@@ -8,40 +8,54 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
+import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass
-from logging import getLogger
+from logging import Logger, getLogger
+from typing import Iterator
 
-import dav
 import numpy as np
-import omni.cae.dav as cae_dav
+import omni.cae.simdata as cae_simdata
 import warp as wp
-from dav.data_models.custom import cell_subset as dav_data_models_cell_subset
-from dav.data_models.vtk import image_data as dav_data_models_vtk_image_data
-from dav.operators import cell_in_box as dav_cell_in_box
-from dav.operators import point_field as dav_point_field
-from dav.operators import point_splats as dav_point_splats
-from dav.operators import voxelization as dav_voxelization
-from omni.cae.data import array_utils, cache, progress, usd_utils
+import warp_simdata as simdata
+from omni.cae.core import array_utils, cache, progress, usd_utils
 from omni.cae.schema import cae
 from omni.cae.schema import viz as cae_viz
 from omni.stageupdate import get_stage_update_interface
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
+from pxr import Gf, OmniSci, Sdf, Tf, Usd, UsdGeom, UsdShade
 from usdrt import Sdf as SdfRT
 from usdrt import Usd as UsdRT
 from usdrt import UsdGeom as UsdGeomRT
 from usdrt import Vt as VtRT
+from warp_simdata.data_models.custom import element_subset as simdata_data_models_element_subset
+from warp_simdata.data_models.custom import voronoi_point_cloud as simdata_data_models_voronoi_point_cloud
+from warp_simdata.data_models.vtk import image_data as simdata_data_models_vtk_image_data
+from warp_simdata.operators import element_field as simdata_element_field
+from warp_simdata.operators import element_in_box as simdata_element_in_box
+from warp_simdata.operators import node_field as simdata_node_field
+from warp_simdata.operators import node_splats as simdata_node_splats
+from warp_simdata.operators import voxelization as simdata_voxelization
 
 logger = getLogger(__name__)
 
 _VOXELIZATION_FIELD_CENTERINGS = {"cell", "point"}
+_POINT_CLOUD_DATA_MODEL_APIS = {
+    "CaeVizDatasetGaussianSplattingAPI": "gaussian",
+    "CaeVizDatasetVoronoiPointCloudAPI": "voronoi",
+}
 
 __all__ = [
     "RtSubPrimGuard",
     "apply_field_mapping",
     "edit_context",
+    "get_available_fields",
     "get_input_dataset",
+    "get_selected_dataset_prims",
+    "get_selected_datasets",
+    "get_selected_field",
     "get_temporal_traits",
     "is_attr_locked",
+    "log_runtime_warnings",
     "process_configure_xac_shader_apis",
     "process_configure_xac_shader_apis_temporal",
     "process_field_selection_apis",
@@ -49,6 +63,18 @@ __all__ = [
     "process_widths",
     "set_array_attribute",
 ]
+
+
+@contextmanager
+def log_runtime_warnings(target_logger: Logger, operation: str) -> Iterator[None]:
+    """Route Python runtime warnings through Kit's warning log channel."""
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always", RuntimeWarning)
+        try:
+            yield
+        finally:
+            for caught_warning in caught_warnings:
+                target_logger.warning("%s: %s", operation, caught_warning.message)
 
 
 class RtSubPrimGuard:
@@ -188,7 +214,7 @@ def is_attr_locked(attr: Usd.Attribute) -> bool:
     return False
 
 
-def process_rescale_range_apis(prim: Usd.Prim, dataset: dav.Dataset):
+def process_rescale_range_apis(prim: Usd.Prim, dataset: simdata.Dataset):
     """
     Processes the CaeVizRescaleRangeAPI schemas on the given prim and rescales the range of the attributes specified in the schemas.
     For every instance of CaeVizRescaleRangeAPI, the range of the attributes specified in the 'includes' relationship are rescaled
@@ -198,7 +224,7 @@ def process_rescale_range_apis(prim: Usd.Prim, dataset: dav.Dataset):
     ----------
     prim : Usd.Prim
         The prim to process
-    dataset : dav.Dataset
+    dataset : simdata.Dataset
         The dataset to obtain the field ranges from
     """
     stage = prim.GetStage()
@@ -296,7 +322,7 @@ def process_rescale_range_apis(prim: Usd.Prim, dataset: dav.Dataset):
             attr.Set(True)
 
 
-def process_configure_xac_shader_apis(prim: Usd.Prim, dataset: dav.Dataset) -> float | None:
+def process_configure_xac_shader_apis(prim: Usd.Prim, dataset: simdata.Dataset) -> float | None:
     """
     Processes the CaeVizConfigureXACShaderAPI schemas on the given prim and configures the XAC shader based on the field.
 
@@ -308,7 +334,7 @@ def process_configure_xac_shader_apis(prim: Usd.Prim, dataset: dav.Dataset) -> f
     ----------
     prim : Usd.Prim
         The prim to process
-    dataset : dav.Dataset
+    dataset : simdata.Dataset
         The dataset to obtain the field ranges from
 
     Returns
@@ -475,10 +501,11 @@ def apply_field_mapping(prim: Usd.Prim, field_name: str, f_array):
 
 def process_field_selection_apis(
     prim: Usd.Prim,
-    dataset: dav.Dataset,
+    dataset: simdata.Dataset,
     *,
     include_fields: set[str] | None = None,
     exclude_fields: set[str] | None = None,
+    output_prim_rt: UsdRT.Prim | None = None,
 ):
     """
     Processes the CaeVizFieldSelectionAPI schemas on the given prim and populates the primvars based on the fields.
@@ -490,16 +517,19 @@ def process_field_selection_apis(
     ----------
     prim : Usd.Prim
         The prim to process
-    dataset : dav.Dataset
+    dataset : simdata.Dataset
         The dataset to populate the primvars into
     include_fields : set[str], optional
         A set of field names to include even if FieldSelectionAPI is not present for them.
     exclude_fields : set[str], optional
         A set of field names to exclude from processing
+    output_prim_rt : UsdRT.Prim, optional
+        RT prim that receives the generated primvars. Defaults to the RT
+        counterpart of ``prim``.
     """
     include_fields = include_fields or set()
     exclude_fields = exclude_fields or set()
-    prim_rt = usd_utils.get_prim_rt(prim)
+    prim_rt = usd_utils.get_prim_rt(prim) if output_prim_rt is None else output_prim_rt
     pv_api = UsdGeomRT.PrimvarsAPI(prim_rt)
 
     instance_names = set(usd_utils.get_instances(prim, "CaeVizFieldSelectionAPI"))
@@ -512,14 +542,14 @@ def process_field_selection_apis(
             continue
 
         field = dataset.get_field(field_name)
-        if field.association == dav.AssociationType.VERTEX:
+        if field.association == simdata.AssociationType.NODE:
             interpolation = UsdGeomRT.Tokens.vertex
-        elif field.association == dav.AssociationType.CELL:
+        elif field.association == simdata.AssociationType.ELEMENT:
             interpolation = UsdGeomRT.Tokens.uniform
         else:
             raise ValueError(f"Unsupported association type {field.association} for primvar {field_name}")
 
-        f_array = cae_dav.fetch_data(dataset, field_name)
+        f_array = cae_simdata.fetch_data(dataset, field_name)
         assert f_array is not None, f"Field {field_name} not found or cannot be passed as primvar"
 
         if f_array.ndim > 2:
@@ -529,19 +559,20 @@ def process_field_selection_apis(
         # process field mapping API if present
         f_array = apply_field_mapping(prim, field_name, f_array)
 
+        array_dtype = array_utils.get_numpy_dtype(f_array)
         nb_comps = f_array.shape[1] if f_array.ndim > 1 else 1
         if nb_comps == 1:
-            if f_array.dtype in [np.float32, np.float64]:
+            if array_dtype in [np.float32, np.float64]:
                 pv_type = SdfRT.ValueTypeNames.FloatArray
-            elif f_array.dtype in [np.int32, np.int64]:
+            elif array_dtype in [np.int32, np.int64]:
                 pv_type = SdfRT.ValueTypeNames.IntArray
             else:
                 logger.error(f"Unsupported dtype {f_array.dtype} for primvar {field_name}")
                 continue
         elif nb_comps == 3:
-            if f_array.dtype in [np.float32, np.float64]:
+            if array_dtype in [np.float32, np.float64]:
                 pv_type = SdfRT.ValueTypeNames.Float3Array
-            elif f_array.dtype in [np.int32, np.int64]:
+            elif array_dtype in [np.int32, np.int64]:
                 pv_type = SdfRT.ValueTypeNames.Int3Array
             else:
                 logger.error(f"Unsupported dtype {f_array.dtype} for primvar {field_name}")
@@ -560,7 +591,7 @@ def process_field_selection_apis(
         set_array_attribute(pv.GetAttr(), f_array)
 
 
-def process_widths(prim: Usd.Prim, dataset: dav.Dataset, fixed_width: float):
+def process_widths(prim: Usd.Prim, dataset: simdata.Dataset, fixed_width: float):
     if prim.HasAPI(cae_viz.FieldSelectionAPI, "widths") and dataset.has_field("widths"):
         return  # widths are/will-be passed as primvar by process_field_selection_apis
 
@@ -573,12 +604,58 @@ def process_widths(prim: Usd.Prim, dataset: dav.Dataset, fixed_width: float):
     # widths are being used.
     if prim.HasAPI(cae_viz.FieldSelectionAPI, "widths"):
         pv = pv_api.CreatePrimvar("widths", SdfRT.ValueTypeNames.FloatArray, UsdGeomRT.Tokens.vertex)
-        widths = wp.full((dataset.get_num_points(), 1), fixed_width, dtype=wp.float32, device=dataset.device)
+        widths = wp.full((dataset.get_num_nodes(), 1), fixed_width, dtype=wp.float32, device=dataset.device)
         set_array_attribute(pv.GetAttr(), widths)
     else:
         pv = pv_api.CreatePrimvar("widths", SdfRT.ValueTypeNames.FloatArray, UsdGeomRT.Tokens.constant)
         widths = wp.array([fixed_width], dtype=wp.float32, device=dataset.device)
         set_array_attribute(pv.GetAttr(), widths)
+
+
+async def get_available_fields(stage, prim_path) -> list[cae_simdata.FieldInfo]:
+    """Return sorted FieldInfo objects common to all datasets reachable from *prim_path*.
+
+    Walks the ``CaeVizDatasetSelectionAPI:source:target`` relationship on the prim
+    and calls ``GetAvailableFields.invoke()`` on each target dataset prim.  Returns
+    only the fields that appear in every target (intersection), sorted by name.
+    When multiple targets agree on the field name but differ in association, the
+    association from the first target that introduced the field is used.
+
+    Parameters
+    ----------
+    stage:
+        The USD stage.
+    prim_path:
+        Path of the operator prim (``Sdf.Path`` or path string).
+    """
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim:
+        return []
+    source_rel = prim.GetRelationship("cae:viz:dataset_selection:source:target")
+    if not source_rel:
+        return []
+
+    # Collect per-target dicts: name -> FieldInfo
+    per_target: list[dict[str, cae_simdata.FieldInfo]] = []
+    for target_path in source_rel.GetTargets():
+        target = stage.GetPrimAtPath(target_path)
+        if not target:
+            continue
+        fields = {fi.name: fi for fi in await cae_simdata.GetAvailableFields.invoke(target)}
+        per_target.append(fields)
+
+    if not per_target:
+        return []
+
+    # Intersect on field name; keep FieldInfo from the first dict that has it
+    common_names = set(per_target[0].keys())
+    for fields in per_target[1:]:
+        common_names &= fields.keys()
+
+    return sorted(
+        (per_target[0][name] for name in common_names),
+        key=lambda fi: fi.name,
+    )
 
 
 def _get_selected_dataset_prims(prim: Usd.Prim, instance_name: str) -> list[Usd.Prim]:
@@ -589,15 +666,119 @@ def _get_selected_dataset_prims(prim: Usd.Prim, instance_name: str) -> list[Usd.
         )
 
     ds_api = cae_viz.DatasetSelectionAPI(prim, instance_name)
-    dataset_prims = usd_utils.get_target_prims(ds_api.GetPrim(), ds_api.GetTargetRel().GetName())
-    assert len(dataset_prims) > 0, f"No target prims found for DatasetSelectionAPI at {ds_api.GetPath()}"
+    target_rel = ds_api.GetTargetRel()
+    target_paths = target_rel.GetTargets() if target_rel else []
+    if not target_paths:
+        raise usd_utils.QuietableException(
+            f"No target prims found for DatasetSelectionAPI:{instance_name} at {ds_api.GetPath()}"
+        )
+
+    stage = prim.GetStage()
+    dataset_prims = []
+    for target_path in target_paths:
+        dataset_prim = stage.GetPrimAtPath(target_path)
+        if not dataset_prim:
+            raise usd_utils.QuietableException(
+                f"Missing target prim at path {target_path} for DatasetSelectionAPI:{instance_name} at {ds_api.GetPath()}"
+            )
+        dataset_prims.append(dataset_prim)
     return dataset_prims
 
 
+def get_selected_dataset_prims(prim: Usd.Prim, instance_name: str) -> list[Usd.Prim]:
+    """Return dataset prims targeted by CaeVizDatasetSelectionAPI:<instance_name>."""
+    return _get_selected_dataset_prims(prim, instance_name)
+
+
+def _validate_selected_dataset_prim_types(dataset_prims: list[Usd.Prim]) -> None:
+    if all(ds_prim.IsA(cae.DataSet) for ds_prim in dataset_prims):
+        return
+    if all(ds_prim.IsA(OmniSci.Dataset) for ds_prim in dataset_prims):
+        return
+    if all(ds_prim.IsA(UsdGeom.Mesh) for ds_prim in dataset_prims):
+        return
+    raise ValueError(
+        "Mixing CaeDataSet, OmniSciDataset, and UsdGeomMesh prims in the same DatasetSelectionAPI is not supported. "
+        f"Found prims: {[p.GetPath() for p in dataset_prims]}"
+    )
+
+
+async def get_selected_datasets(
+    prim: Usd.Prim,
+    instance_name: str,
+    *,
+    timeCode: Usd.TimeCode,
+    device: str,
+    needs_topology: bool = True,
+    needs_geometry: bool = True,
+) -> list[simdata.Dataset]:
+    """
+    Returns the selected datasets for the given instance name.
+    This handles dataset prims of both types CaeDataSet or OmniSciDataset.
+
+    Parameters
+    ----------
+    prim : Usd.Prim
+        The prim to get the selected dataset from
+    instance_name : str
+        The instance name of the DatasetSelectionAPI
+    timeCode : Usd.TimeCode
+        The time code to get the dataset for
+    device : str
+        The device to get the dataset for
+    needs_topology : bool, optional
+        Whether the dataset needs topology information, by default True
+    needs_geometry : bool, optional
+        Whether the dataset needs geometry information, by default True
+
+    Returns
+    -------
+    list[simdata.Dataset]
+        The selected datasets
+    """
+
+    # TODO: this should handle CaeVizDatasetTransformingAPI instances as well and return a transformed dataset.
+    # SimData should add support for a data model for xformed datasets.
+
+    cache_key = (
+        f"[viz:get_selected_dataset]::{instance_name}:{prim.GetPath()}::{device}::{needs_topology}::{needs_geometry}"
+    )
+    if cached := cache.get(cache_key, timeCode=timeCode):
+        return [dataset.shallow_copy() for dataset in cached]
+
+    dataset_prims = _get_selected_dataset_prims(prim, instance_name)
+    _validate_selected_dataset_prim_types(dataset_prims)
+
+    datasets = []
+    for dataset_prim in dataset_prims:
+        if not dataset_prim:
+            continue
+        dataset = await cae_simdata.get_dataset(
+            dataset_prim, timeCode, device=device, needs_topology=needs_topology, needs_geometry=needs_geometry
+        )
+        datasets.append(dataset)
+
+    prim_watches = []
+    prim_watches.extend(cache.PrimWatch(p) for p in dataset_prims)
+    prim_watches.append(cache.PrimWatch(prim, on="delete"))
+    prim_watches.append(cache.PrimWatch(prim, on="any", schemas=[(cae_viz.DatasetSelectionAPI, instance_name)]))
+    cache.put_ex(cache_key, datasets, prims=prim_watches, timeCode=timeCode)
+    return [dataset.shallow_copy() for dataset in datasets]
+
+
 def _resolve_selected_field_names(
-    prim: Usd.Prim, dataset_prim: Usd.Prim, f_selection_api: cae_viz.FieldSelectionAPI
+    prim: Usd.Prim, dataset_prim: Usd.Prim, f_selection_api: cae_viz.FieldSelectionAPI, timeCode: Usd.TimeCode
 ) -> list[str]:
     """Resolve FieldSelectionAPI targets to field names on a selected dataset prim."""
+    if dataset_prim.IsA(OmniSci.Dataset):
+        field_names = f_selection_api.GetFieldNamesAttr().Get(timeCode)
+        return [str(name) for name in field_names] if field_names else []
+    if not dataset_prim.IsA(cae.DataSet):
+        raise ValueError(
+            f"Unsupported dataset prim type {dataset_prim.GetTypeName()} for FieldSelectionAPI at "
+            f"{f_selection_api.GetPath()}. Expected CaeDataSet or OmniSciDataset."
+        )
+
     target_rel = f_selection_api.GetTargetRel()
     dataset_field_rels = sorted(
         str(rel.GetName()) for rel in dataset_prim.GetRelationships() if str(rel.GetName()).startswith("field:")
@@ -619,36 +800,42 @@ def _resolve_selected_field_names(
 
 
 def _apply_field_selection_mode(
-    field: dav.Field, f_selection_api: cae_viz.FieldSelectionAPI, prim: Usd.Prim, timeCode: Usd.TimeCode
-) -> dav.Field:
-    """Apply CaeVizFieldSelectionAPI mode to a loaded DAV field."""
+    field: simdata.Field, f_selection_api: cae_viz.FieldSelectionAPI, prim: Usd.Prim, timeCode: Usd.TimeCode
+) -> simdata.Field:
+    """Apply CaeVizFieldSelectionAPI mode to a loaded SimData field."""
     selection_mode = f_selection_api.GetModeAttr().Get(timeCode)
     if selection_mode == cae_viz.Tokens.unchanged:
         return field
     if selection_mode == cae_viz.Tokens.vector_magnitude:
-        return dav.Field.from_field(field, magnitude=True) if dav.utils.is_vector_dtype(field.dtype) else field
+        return simdata.Field.from_field(field, magnitude=True) if simdata.utils.is_vector_dtype(field.dtype) else field
     if selection_mode == cae_viz.Tokens.selected_component:
         component_index = f_selection_api.GetComponentIndexAttr().Get(timeCode)
-        if not dav.utils.is_vector_dtype(field.dtype):
+        if not simdata.utils.is_vector_dtype(field.dtype):
             if component_index != 0:
                 logger.warning(
                     f"Component index {component_index} is not supported for scalar fields on prim {prim.GetPath()}."
                 )
             return field
 
-        nb_components = dav.utils.get_vector_length(field.dtype)
+        nb_components = simdata.utils.get_vector_length(field.dtype)
         if component_index < 0 or component_index >= nb_components:
             raise ValueError(
                 f"Component index {component_index} out of range for field dtype {field.dtype}. "
                 f"Vector length is {nb_components}."
             )
-        return dav.Field.from_field(field, component=component_index)
+        return simdata.Field.from_field(field, component=component_index)
     raise ValueError(f"Unsupported FieldSelectionAPI mode '{selection_mode}'.")
 
 
 async def _get_selected_field(
-    prim: Usd.Prim, dataset_prim: Usd.Prim, instance_name: str, *, timeCode: Usd.TimeCode, device: str
-) -> dav.Field:
+    prim: Usd.Prim,
+    dataset_prim: Usd.Prim,
+    instance_name: str,
+    *,
+    timeCode: Usd.TimeCode,
+    device: str,
+    representation=None,
+) -> simdata.Field:
     """Load a field described by CaeVizFieldSelectionAPI:<instance_name>."""
     if not prim.HasAPI(cae_viz.FieldSelectionAPI, instance_name):
         raise ValueError(
@@ -656,22 +843,32 @@ async def _get_selected_field(
         )
 
     f_selection_api = cae_viz.FieldSelectionAPI(prim, instance_name)
-    field_names = _resolve_selected_field_names(prim, dataset_prim, f_selection_api)
+    field_names = _resolve_selected_field_names(prim, dataset_prim, f_selection_api, timeCode)
     if not field_names:
         raise usd_utils.QuietableException(
             f"No target field names found for FieldSelectionAPI at {f_selection_api.GetPath()}"
         )
-    field = await cae_dav.GetField.invoke(dataset_prim, field_names, device=device, timeCode=timeCode)
+    field = await cae_simdata.GetField.invoke(
+        dataset_prim, field_names, device=device, timeCode=timeCode, representation=representation
+    )
     return _apply_field_selection_mode(field, f_selection_api, prim, timeCode)
 
 
+async def get_selected_field(
+    prim: Usd.Prim, dataset_prim: Usd.Prim, instance_name: str, *, timeCode: Usd.TimeCode, device: str
+) -> simdata.Field:
+    """Load a field described by CaeVizFieldSelectionAPI:<instance_name>."""
+    return await _get_selected_field(prim, dataset_prim, instance_name, timeCode=timeCode, device=device)
+
+
 async def _add_selected_fields(
-    dataset: dav.Dataset,
+    dataset: simdata.Dataset,
     dataset_prim: Usd.Prim,
     prim: Usd.Prim,
     timeCode: Usd.TimeCode,
     required_instances: set[str] | None = None,
-) -> dav.Dataset:
+    representation=None,
+) -> simdata.Dataset:
     """Populate selected fields onto a loaded dataset."""
     required_instances = required_instances or set()
     instance_names = usd_utils.get_instances(prim, "CaeVizFieldSelectionAPI")
@@ -682,7 +879,12 @@ async def _add_selected_fields(
     for instance_name in instance_names:
         try:
             field = await _get_selected_field(
-                prim, dataset_prim, instance_name, timeCode=timeCode, device=dataset.device
+                prim,
+                dataset_prim,
+                instance_name,
+                timeCode=timeCode,
+                device=dataset.device,
+                representation=representation,
             )
             dataset.add_field(instance_name, field)
         except usd_utils.QuietableException as exc:
@@ -706,6 +908,14 @@ def _get_voxelization_field_centering(nvdb_api: cae_viz.DatasetVoxelizationAPI, 
     if field_centering not in _VOXELIZATION_FIELD_CENTERINGS:
         raise ValueError(f"Unsupported voxelization field centering: {field_centering}")
     return field_centering
+
+
+def _get_voxelization_output_association(field_centering: str) -> simdata.AssociationType:
+    if field_centering == "point":
+        return simdata.AssociationType.NODE
+    if field_centering == "cell":
+        return simdata.AssociationType.ELEMENT
+    raise ValueError(f"Unsupported voxelization field centering: {field_centering}")
 
 
 def _get_voxelization_parameters(
@@ -828,6 +1038,43 @@ def _get_voxelization_parameters(
         raise ValueError(f"Unsupported NanoVDB voxel size mode: {vox_size_mode}")
 
 
+def _get_dataset_point_cloud_model(prim: Usd.Prim, instance_name: str, *, warn: bool = True) -> str | None:
+    """
+    Return the point-cloud data model API selected for ``instance_name``.
+
+    Gaussian splatting and Voronoi point-cloud conversion are mutually exclusive
+    point-cloud dataset models. If both are applied, USD's applied API schema
+    order decides which one wins. Gaussian is only processed when voxelization is
+    also applied, since its radius is derived from the voxel size.
+    """
+    matches = []
+    for applied_schema in prim.GetAppliedSchemas():
+        schema_name, sep, applied_instance = applied_schema.partition(":")
+        if not sep or applied_instance != instance_name:
+            continue
+        if model := _POINT_CLOUD_DATA_MODEL_APIS.get(schema_name):
+            matches.append((schema_name, model))
+
+    # Fall back to HasAPI if applied-schema metadata is unexpectedly unavailable.
+    if not matches:
+        if prim.HasAPI(cae_viz.DatasetGaussianSplattingAPI, instance_name):
+            matches.append(("CaeVizDatasetGaussianSplattingAPI", "gaussian"))
+        if prim.HasAPI(cae_viz.DatasetVoronoiPointCloudAPI, instance_name):
+            matches.append(("CaeVizDatasetVoronoiPointCloudAPI", "voronoi"))
+
+    if len(matches) > 1 and warn:
+        logger.warning(
+            "Multiple point-cloud data model APIs are applied to %s for dataset instance '%s' (%s). "
+            "Using %s because it appears first in the applied API schema order.",
+            prim.GetPath(),
+            instance_name,
+            ", ".join(schema_name for schema_name, _ in matches),
+            matches[0][0],
+        )
+
+    return matches[0][1] if matches else None
+
+
 async def get_input_dataset(
     prim: Usd.Prim,
     instance_name: str,
@@ -838,7 +1085,8 @@ async def get_input_dataset(
     needs_geometry: bool = True,
     needs_fields: bool = True,
     required_fields: set[str] | None = None,
-) -> dav.Dataset:
+    field_associations: dict[str, simdata.AssociationType] | None = None,
+) -> simdata.Dataset:
     """
     Returns the input dataset for the given instance name, applying any relevant API schemas on the prim
     for preparing the input dataset.
@@ -846,9 +1094,11 @@ async def get_input_dataset(
     This function automatically handles:
     - Loading the dataset specified by DatasetSelectionAPI
     - Applying DatasetGaussianSplattingAPI transformations (if present)
+    - Applying DatasetVoronoiPointCloudAPI transformations (if present)
     - Applying DatasetVoxelizationAPI transformations (if present)
     - Applying DatasetTransformingAPI transformations (if present)
     - Loading all fields specified by FieldSelectionAPI instances
+    - Converting selected fields to caller-required associations
 
     Caching:
     --------
@@ -879,10 +1129,14 @@ async def get_input_dataset(
         Whether the caller needs access to dataset fields, by default True
     required_fields : set[str], optional
         A set of field selection instance names that are required; if fetching these fields fails, an exception is raised.
+    field_associations : dict[str, simdata.AssociationType], optional
+        Required output association for selected field instances. Node-to-element and
+        element-to-node conversions use the corresponding Warp SimData averaging
+        operator after the dataset pipeline has been applied.
 
     Returns
     -------
-    dav.Dataset
+    simdata.Dataset
         The input dataset with all requested transformations and fields applied
 
     Raises
@@ -895,19 +1149,29 @@ async def get_input_dataset(
             f"Prim {prim.GetPath()} does not have CaeVizDatasetSelectionAPI with instance name '{instance_name}'"
         )
     required_fields = set(required_fields or [])
+    field_associations = dict(field_associations or {})
+    supported_associations = {simdata.AssociationType.NODE, simdata.AssociationType.ELEMENT}
+    invalid_associations = set(field_associations.values()) - supported_associations
+    if invalid_associations:
+        raise ValueError(f"Unsupported requested field associations: {invalid_associations}")
+    if field_associations and not needs_fields:
+        raise ValueError("field_associations requires needs_fields=True")
 
     # Compute effective topology/geometry requirements up front so the cache key reflects
     # the actual computation rather than the caller's (possibly weaker) request.
     has_transforming = prim.HasAPI(cae_viz.DatasetTransformingAPI, instance_name)
-    has_gaussian = prim.HasAPI(cae_viz.DatasetGaussianSplattingAPI, instance_name)
+    point_cloud_model = _get_dataset_point_cloud_model(prim, instance_name)
+    has_gaussian_point_cloud_model = point_cloud_model == "gaussian"
+    has_voronoi_point_cloud_model = point_cloud_model == "voronoi"
+    has_point_cloud_model = has_gaussian_point_cloud_model or has_voronoi_point_cloud_model
     has_voxelization = prim.HasAPI(cae_viz.DatasetVoxelizationAPI, instance_name)
     has_subset = prim.HasAPI(cae_viz.DatasetSubsetAPI, instance_name)
 
-    if has_transforming or has_gaussian:
+    if has_transforming or has_voronoi_point_cloud_model or (has_voxelization and has_gaussian_point_cloud_model):
         needs_geometry = True
 
-    if has_voxelization and not has_gaussian:
-        # We need topology for voxelization to work, but not if gaussian splatting is also applied.
+    if has_voxelization and not has_point_cloud_model:
+        # We need topology for voxelization to work, but not if a point-cloud data model is also applied.
         needs_topology = True
 
     if has_subset:
@@ -915,36 +1179,102 @@ async def get_input_dataset(
         needs_topology = True
         needs_geometry = True
 
-    # if gaussian splatting is applied, needs_fields is true and we have any non-vertex centered fields, then we need topology
-    if has_gaussian and (not needs_topology):
+    if field_associations:
+        # Association conversion traverses element topology in both directions.
+        needs_topology = True
+
+    # If a point-cloud data model is applied, needs_fields is true, and we have any non-vertex
+    # centered fields, then we need topology.
+    if (has_voronoi_point_cloud_model or (has_voxelization and has_gaussian_point_cloud_model)) and (
+        not needs_topology
+    ):
         # TODO: make this actually check for non-vertex centered fields
         needs_topology = True
 
+    dataset_prims = _get_selected_dataset_prims(prim, instance_name)
+    logger.debug(
+        "[cae.viz.utils][dataset] selected prim=%s instance=%s targets=%s time=%s",
+        prim.GetPath(),
+        instance_name,
+        [str(p.GetPath()) for p in dataset_prims if p],
+        timeCode,
+    )
+    _validate_selected_dataset_prim_types(dataset_prims)
+
+    dual_requested = prim.HasAPI(cae_viz.DatasetDualAPI, instance_name)
+    axisymmetric_options_authored = prim.HasAPI(cae_viz.DatasetAxisymmetricRepresentationAPI, instance_name)
+    if dual_requested or axisymmetric_options_authored:
+        if len(dataset_prims) != 1:
+            raise usd_utils.QuietableException(
+                "An authored dataset representation requires exactly one selected dataset."
+            )
+
+    try:
+        representations = [
+            cae_simdata.resolve_representation(dataset_prim, prim, instance_name, dual=dual_requested)
+            for dataset_prim in dataset_prims
+        ]
+    except ValueError as exc:
+        raise usd_utils.QuietableException(str(exc)) from exc
+
+    if dual_requested or axisymmetric_options_authored:
+        if not representations or representations[0] is None:
+            request_name = "a dual" if dual_requested else "an axisymmetric"
+            raise usd_utils.QuietableException(
+                f"Dataset {dataset_prims[0].GetPath()} does not support {request_name} representation."
+            )
+
     required_fields_key = ",".join(sorted(required_fields)) if needs_fields else ""
+    field_associations_key = ",".join(
+        f"{name}={association.name}" for name, association in sorted(field_associations.items())
+    )
     cache_key = (
         f"[viz:get_input_dataset]::{instance_name}:{prim.GetPath()}::{device}::"
-        f"{needs_topology}::{needs_geometry}::{needs_fields}::{required_fields_key}"
+        f"{needs_topology}::{needs_geometry}::{needs_fields}::{required_fields_key}::"
+        f"{field_associations_key}::{point_cloud_model or 'none'}::"
+        f"{tuple(repr(representation) for representation in representations)}"
     )
     ds = cache.get(cache_key, timeCode=timeCode)
     if ds:
+        logger.debug(
+            "[cae.viz.utils][dataset] cache-hit prim=%s instance=%s time=%s device=%s key=%s",
+            prim.GetPath(),
+            instance_name,
+            timeCode,
+            device,
+            cache_key,
+        )
         return ds
+    logger.debug(
+        "[cae.viz.utils][dataset] cache-miss prim=%s instance=%s time=%s device=%s "
+        "needs_topology=%s needs_geometry=%s needs_fields=%s required_fields=%s key=%s",
+        prim.GetPath(),
+        instance_name,
+        timeCode,
+        device,
+        needs_topology,
+        needs_geometry,
+        needs_fields,
+        sorted(required_fields),
+        cache_key,
+    )
 
-    dataset_prims = _get_selected_dataset_prims(prim, instance_name)
     datasets = [
         (
-            await cae_dav.get_dataset(
+            await cae_simdata.get_dataset(
                 dataset_prim,
                 timeCode,
                 device=device,
                 needs_topology=needs_topology,
                 needs_geometry=needs_geometry,
+                representation=representation,
             )
         ).shallow_copy()
-        for dataset_prim in dataset_prims
+        for dataset_prim, representation in zip(dataset_prims, representations)
         if dataset_prim
     ]
     try:
-        dataset = dav.DatasetCollection.from_datasets(datasets) if len(datasets) > 1 else datasets[0]
+        dataset = simdata.DatasetCollection.from_datasets(datasets) if len(datasets) > 1 else datasets[0]
     except ValueError as exc:
         raise ValueError(
             f"Failed to create DatasetCollection from datasets for DatasetSelectionAPI at {prim.GetPath()} "
@@ -954,14 +1284,47 @@ async def get_input_dataset(
     if needs_fields:
         if len(datasets) > 1:
             raise NotImplementedError("Field selection from multiple datasets is not supported yet.")
-        dataset = await _add_selected_fields(dataset, dataset_prims[0], prim, timeCode, required_fields)
+        dataset = await _add_selected_fields(
+            dataset,
+            dataset_prims[0],
+            prim,
+            timeCode,
+            required_fields,
+            representation=representations[0],
+        )
 
+    if has_voronoi_point_cloud_model:
+        dataset = await _process_dataset_voronoi_point_cloud(dataset, prim, instance_name, timeCode)
+    elif has_gaussian_point_cloud_model and not has_voxelization:
+        logger.warning(
+            "Ignoring %s on %s for dataset instance '%s' because Gaussian splatting requires "
+            "CaeVizDatasetVoxelizationAPI to derive a voxel-sized splat radius.",
+            "CaeVizDatasetGaussianSplattingAPI",
+            prim.GetPath(),
+            instance_name,
+        )
     if has_subset:
         dataset = await _process_dataset_subset(dataset, prim, instance_name, timeCode)
     if has_voxelization:
-        dataset = await _process_dataset_voxelization(dataset, prim, instance_name, timeCode)
+        voxelization_point_cloud_model = "gaussian" if has_gaussian_point_cloud_model else None
+        dataset = await _process_dataset_voxelization(
+            dataset, prim, instance_name, timeCode, voxelization_point_cloud_model
+        )
     if has_transforming:
         dataset = await _process_dataset_transforming(dataset, prim, instance_name, timeCode)
+
+    for field_name, requested_association in field_associations.items():
+        if not dataset.has_field(field_name):
+            continue
+        field = dataset.get_field(field_name)
+        if field.association == requested_association:
+            continue
+        if requested_association == simdata.AssociationType.NODE:
+            with progress.ProgressContext("Executing SimData [node_field]"):
+                dataset = simdata_node_field.compute(dataset, field_name, output_field_name=field_name)
+        else:
+            with progress.ProgressContext("Executing SimData [element_field]"):
+                dataset = simdata_element_field.compute(dataset, field_name, output_field_name=field_name)
 
     prim_watches = []
     # if any dataset prim changes, this cache becomes invalid.
@@ -976,8 +1339,11 @@ async def get_input_dataset(
             on="any",
             schemas=[
                 (cae_viz.DatasetSelectionAPI, instance_name),
+                (cae_viz.DatasetAxisymmetricRepresentationAPI, instance_name),
+                (cae_viz.DatasetDualAPI, instance_name),
                 (cae_viz.DatasetTransformingAPI, instance_name),
                 (cae_viz.DatasetGaussianSplattingAPI, instance_name),
+                (cae_viz.DatasetVoronoiPointCloudAPI, instance_name),
                 (cae_viz.DatasetVoxelizationAPI, instance_name),
                 (cae_viz.DatasetSubsetAPI, instance_name),
             ],
@@ -1011,14 +1377,14 @@ async def get_input_dataset(
 
 
 async def _process_dataset_transforming(
-    dataset: dav.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode
-) -> dav.Dataset:
+    dataset: simdata.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode
+) -> simdata.Dataset:
     """
     Processes the dataset transforming API on the dataset.
 
     Parameters
     ----------
-    dataset : dav.Dataset
+    dataset : simdata.Dataset
         The dataset to process
     prim : Usd.Prim
         The prim to process
@@ -1032,12 +1398,12 @@ async def _process_dataset_transforming(
 
 
 async def _process_dataset_subset(
-    dataset: dav.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode
-) -> dav.Dataset:
+    dataset: simdata.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode
+) -> simdata.Dataset:
     """
     Processes the dataset subset API on the dataset by selecting cells whose
     geometry relates to the ROI's axis-aligned bounds according to the API's
-    'mode' attribute. Uses the cell_in_box operator to build the subset.
+    'mode' attribute. Uses the element_in_box operator to build the subset.
     """
     assert prim.HasAPI(
         cae_viz.DatasetSubsetAPI, instance_name
@@ -1066,24 +1432,35 @@ async def _process_dataset_subset(
     mode = subset_api.GetModeAttr().Get(timeCode)
     box_min = wp.vec3f(*roi_bounds.GetMin())
     box_max = wp.vec3f(*roi_bounds.GetMax())
-    with progress.ProgressContext("Executing DAV [cell_in_box]"):
-        indices = dav_cell_in_box.compute_indices(dataset, box_min, box_max, mode=mode)
-    ds = dav_data_models_cell_subset.create_dataset(dataset, indices)
-    ds.add_field("cell_idx", dav.Field.from_array(indices, association=dav.AssociationType.CELL))
-    ds = cae_dav.pass_fields(dataset, ds, exclude_fields={"cell_idx"})
-    ds.remove_field("cell_idx")
+    with progress.ProgressContext("Executing SimData [element_in_box]"):
+        indices = simdata_element_in_box.compute_indices(dataset, box_min, box_max, mode=mode)
+    ds = simdata_data_models_element_subset.create_dataset(dataset, indices)
+    ds.add_field("element_idx", simdata.Field.from_array(indices, association=simdata.AssociationType.ELEMENT))
+    ds = cae_simdata.pass_fields(dataset, ds, exclude_fields={"element_idx"})
+    ds.remove_field("element_idx")
     return ds
 
 
+async def _add_dataset_fields_as_node_fields(
+    source_dataset: simdata.Dataset, point_dataset: simdata.Dataset
+) -> simdata.Dataset:
+    """Copy all fields from ``source_dataset`` onto ``point_dataset`` as node fields."""
+    for field_name in source_dataset.get_field_names():
+        with progress.ProgressContext("Executing SimData [node_field]"):
+            tmp_dataset = simdata_node_field.compute(source_dataset, field_name, output_field_name="_node_field")
+        point_dataset.add_field(field_name, tmp_dataset.get_field("_node_field"))
+    return point_dataset
+
+
 async def _process_dataset_gaussian_splatting(
-    dataset: dav.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode, voxel_size: wp.vec3f
-) -> dav.Dataset:
+    dataset: simdata.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode, voxel_size: wp.vec3f
+) -> simdata.Dataset:
     """
     Processes the dataset gaussian splatting API on the dataset.
 
     Parameters
     ----------
-    dataset : dav.Dataset
+    dataset : simdata.Dataset
         The dataset to process
     prim : Usd.Prim
         The prim to process
@@ -1099,39 +1476,54 @@ async def _process_dataset_gaussian_splatting(
     radius = radius_factor * min(voxel_size)
     logger.info(f"Gaussian splatting radius: {radius:.3f}")
     sharpness = api.GetSharpnessAttr().Get(timeCode)
-    with progress.ProgressContext("Executing DAV [point_splats]"):
-        splatted_dataset = dav_point_splats.compute(dataset, radius, sharpness)
-    # convert cell fields to point fields before splatting.
-    for field_name in dataset.get_field_names():
-        with progress.ProgressContext("Executing DAV [point_field]"):
-            tmp_dataset = dav_point_field.compute(dataset, field_name, output_field_name="_point_field")
-        splatted_dataset.add_field(field_name, tmp_dataset.get_field("_point_field"))
-    return splatted_dataset
+    with progress.ProgressContext("Executing SimData [node_splats]"):
+        splatted_dataset = simdata_node_splats.compute(dataset, radius, sharpness)
+    return await _add_dataset_fields_as_node_fields(dataset, splatted_dataset)
+
+
+async def _process_dataset_voronoi_point_cloud(
+    dataset: simdata.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode
+) -> simdata.Dataset:
+    """
+    Processes the dataset Voronoi point-cloud API on the dataset.
+
+    Each source point becomes a Voronoi seed with one implicit logical cell.
+    """
+    assert prim.HasAPI(
+        cae_viz.DatasetVoronoiPointCloudAPI, instance_name
+    ), f"Prim {prim.GetPath()} does not have CaeVizDatasetVoronoiPointCloudAPI with instance name '{instance_name}'"
+
+    logger.info("Converting dataset to Voronoi point cloud")
+    with progress.ProgressContext("Executing SimData [node_splats]"):
+        point_dataset = simdata_node_splats.compute(dataset, radius=0.0, sharpness=1.0)
+    with progress.ProgressContext("Creating SimData [voronoi_point_cloud]"):
+        voronoi_dataset = simdata_data_models_voronoi_point_cloud.create_dataset(point_dataset.handle.points)
+    return await _add_dataset_fields_as_node_fields(dataset, voronoi_dataset)
 
 
 async def _process_dataset_voxelization(
-    dataset: dav.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode
-) -> dav.Dataset:
+    dataset: simdata.Dataset, prim: Usd.Prim, instance_name: str, timeCode: Usd.TimeCode, point_cloud_model: str | None
+) -> simdata.Dataset:
     """
     Processes the dataset voxelization API on the dataset.
 
     Parameters
     ----------
-    dataset : dav.Dataset
+    dataset : simdata.Dataset
         The dataset to process
     prim : Usd.Prim
         The prim to process
     instance_name : str
     """
-    # If no gaussian splatting is needed and every field is already a NanoVDB
+    # If no point-cloud conversion is needed and every field is already a NanoVDB
     # volume, skip the entire voxelization pipeline.
-    if not prim.HasAPI(cae_viz.DatasetGaussianSplattingAPI, instance_name):
+    if point_cloud_model is None:
         field_names = dataset.get_field_names()
         if field_names and all(isinstance(dataset.get_field(fn).get_data(), wp.Volume) for fn in field_names):
             logger.info(f"Skipping voxelization for dataset at {prim.GetPath()} since all fields are already volumes")
             return dataset
 
-    with progress.ProgressContext("Executing DAV [compute bounds]"):
+    with progress.ProgressContext("Executing SimData [compute bounds]"):
         data_bounds = dataset.get_bounds()
     data_bounds_r3d = Gf.Range3d(
         (data_bounds[0][0], data_bounds[0][1], data_bounds[0][2]),
@@ -1139,17 +1531,22 @@ async def _process_dataset_voxelization(
     )
     vox_params = _get_voxelization_parameters(prim, instance_name, data_bounds_r3d, timeCode)
 
-    if prim.HasAPI(cae_viz.DatasetGaussianSplattingAPI, instance_name):
-        # we need to voxelize the dataset after gaussian splatting
+    if point_cloud_model == "gaussian":
+        # We need to voxelize the dataset after Gaussian splatting.
         dataset = await _process_dataset_gaussian_splatting(
             dataset, prim, instance_name, timeCode, vox_params.voxel_size
         )
+    elif point_cloud_model == "voronoi":
+        # We need to voxelize the dataset after Voronoi point-cloud conversion.
+        dataset = await _process_dataset_voronoi_point_cloud(dataset, prim, instance_name, timeCode)
+    elif point_cloud_model is not None:
+        raise ValueError(f"Unsupported point-cloud data model: {point_cloud_model}")
 
     voxelized_dataset = None
     for field_name in dataset.get_field_names():
         # TODO process CaeFieldThresholdingAPI on the field to customize tiles for the generated NanoVDB field.
-        with progress.ProgressContext("Executing DAV [voxelization]"):
-            vds = dav_voxelization.compute(
+        with progress.ProgressContext("Executing SimData [voxelization]"):
+            vds = simdata_voxelization.compute(
                 dataset,
                 field_name,
                 min_ijk=vox_params.min_ijk,
@@ -1158,7 +1555,7 @@ async def _process_dataset_voxelization(
                 use_nanovdb=True,
                 output_field_name=field_name,
                 output_mask_field_name="cae_mask" if voxelized_dataset is None else None,
-                output_association=vox_params.field_centering,
+                output_association=_get_voxelization_output_association(vox_params.field_centering),
             )
         if voxelized_dataset is None:
             voxelized_dataset = vds
@@ -1172,7 +1569,7 @@ async def _process_dataset_voxelization(
         result_extent_max = (
             vox_params.max_ijk + wp.vec3i(1, 1, 1) if vox_params.field_centering == "cell" else vox_params.max_ijk
         )
-        voxelized_dataset = dav_data_models_vtk_image_data.create_dataset(
+        voxelized_dataset = simdata_data_models_vtk_image_data.create_dataset(
             origin=wp.vec3f(0.0),
             spacing=wp.vec3f(*vox_params.voxel_size),
             extent_min=vox_params.min_ijk,
@@ -1187,58 +1584,56 @@ def set_array_attribute(attr: UsdRT.Attribute, array: array_utils.FieldArrayLike
     """
     Sets the attribute value to the given array.
     """
-    f_array = array_utils.IFieldArray.from_array(array)
-
     typename = attr.GetTypeName()
     assert typename.isArray, f"Attribute {attr.GetPath()} is not an array"
     scalar_type = typename.scalarType
     if scalar_type in [SdfRT.ValueTypeNames.Point3f, SdfRT.ValueTypeNames.Vector3f, SdfRT.ValueTypeNames.Float3]:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.float32), VtRT.Vec3fArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.float32), VtRT.Vec3fArray)
     elif scalar_type in [SdfRT.ValueTypeNames.Point3d, SdfRT.ValueTypeNames.Vector3d, SdfRT.ValueTypeNames.Double3]:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.float64), VtRT.Vec3dArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.float64), VtRT.Vec3dArray)
     elif scalar_type in [SdfRT.ValueTypeNames.Float2]:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.float32), VtRT.Vec2fArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.float32), VtRT.Vec2fArray)
     elif scalar_type in [SdfRT.ValueTypeNames.Double2]:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.float64), VtRT.Vec2dArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.float64), VtRT.Vec2dArray)
     elif scalar_type in [SdfRT.ValueTypeNames.Quatf, SdfRT.ValueTypeNames.Float4]:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.float32), VtRT.Vec4fArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.float32), VtRT.Vec4fArray)
     elif scalar_type in [SdfRT.ValueTypeNames.Quatd, SdfRT.ValueTypeNames.Double4]:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.float64), VtRT.Vec4dArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.float64), VtRT.Vec4dArray)
     elif scalar_type in [SdfRT.ValueTypeNames.Quath]:
         # Manually handle here, since we can't use _set_array_attribute because there's
         # no as_type() for half-floats.
-        if f_array.device_id == -1:
-            vt_array = VtRT.QuathArray(f_array.numpy())
-        else:
-            vt_array = VtRT.QuathArray(f_array)
+        vt_array = VtRT.QuathArray(array_utils.as_numpy_array(array))
         attr.Set(vt_array)
     elif scalar_type in [SdfRT.ValueTypeNames.Float]:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.float32), VtRT.FloatArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.float32), VtRT.FloatArray)
     elif scalar_type in [SdfRT.ValueTypeNames.Double]:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.float64), VtRT.DoubleArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.float64), VtRT.DoubleArray)
     elif scalar_type == SdfRT.ValueTypeNames.Int:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.int32), VtRT.IntArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.int32), VtRT.IntArray)
     elif scalar_type == SdfRT.ValueTypeNames.Int64:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.int64), VtRT.Int64Array)
+        _set_array_attribute(attr, array_utils.as_type(array, np.int64), VtRT.Int64Array)
     elif scalar_type == SdfRT.ValueTypeNames.UInt:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.uint32), VtRT.UIntArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.uint32), VtRT.UIntArray)
     elif scalar_type == SdfRT.ValueTypeNames.UInt64:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.uint64), VtRT.UInt64Array)
+        _set_array_attribute(attr, array_utils.as_type(array, np.uint64), VtRT.UInt64Array)
     elif scalar_type == SdfRT.ValueTypeNames.Int2:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.int32), VtRT.Vec2iArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.int32), VtRT.Vec2iArray)
     elif scalar_type == SdfRT.ValueTypeNames.Int3:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.int32), VtRT.Vec3iArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.int32), VtRT.Vec3iArray)
     elif scalar_type == SdfRT.ValueTypeNames.Int4:
-        _set_array_attribute(attr, array_utils.as_type(f_array, np.int32), VtRT.Vec4iArray)
+        _set_array_attribute(attr, array_utils.as_type(array, np.int32), VtRT.Vec4iArray)
     else:
         raise ValueError(f"Unsupported scalar type {scalar_type} for attribute {attr.GetPath()}")
 
 
-def _set_array_attribute(attr: UsdRT.Attribute, f_array: array_utils.IFieldArray, attr_type) -> None:
+def _set_array_attribute(attr: UsdRT.Attribute, array: array_utils.FieldArrayLike, attr_type) -> None:
     """
     Sets the attribute value to the given UsdRT.Array.
     """
-    vt_array = array_utils.to_vtrt_array(f_array)
+    vt_array, _vt_buffer = array_utils.to_vtrt_array_with_buffer(array)
+    # Keep the backing buffer alive until Set() copies it. This matters for
+    # Windows int/uint arrays, where we pass a zero-copy intc/uintc view to
+    # satisfy VtRT's strict buffer format check.
     attr.Set(vt_array)
     # attr.SyncDataToGpu()
 

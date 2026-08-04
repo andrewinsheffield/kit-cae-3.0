@@ -12,12 +12,12 @@ import asyncio
 
 import omni.kit.commands
 import omni.timeline
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.npz import import_to_stage
-from omni.cae.schema import cae
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
+from pxr import UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
@@ -25,21 +25,16 @@ from omni.usd import get_context
 
 
 async def main(skip_play: bool = False):
-    # 0. Import the NPZ file as SIDS Unstructured
+    # 0. Import the NPZ file as CGNS
     npz_path = get_test_data_path("disk_out_ref.npz")
-    await import_to_stage(npz_path, "/World/disk_out_ref_npz", schema_type="SIDS Unstructured")
+    await import_to_stage(npz_path, "/World/disk_out_ref_npz", schema="CGNS")
 
     ctx = get_context()
     stage = ctx.get_stage()
+    UsdGeom.Xform.Define(stage, "/World/CAE")
 
-    # 1. Fix field associations; this is needed for "SIDS Unstructured" schema type
-    dataset_path = "/World/disk_out_ref_npz/NumPyDataSet"
-    array_base_path = "/World/disk_out_ref_npz/NumPyArrays"
-    array_paths = [f"{array_base_path}/{base}" for base in ["AsH3", "CH4", "GaMe3", "H2", "Pres", "Temp", "V"]]
-    for array_path in array_paths:
-        array_prim = stage.GetPrimAtPath(array_path)
-        field_array_api = cae.FieldArray(array_prim)
-        field_array_api.CreateFieldAssociationAttr().Set(cae.Tokens.vertex)
+    # 1. Use the imported CGNS section as the renderable dataset.
+    dataset_path = "/World/disk_out_ref_npz/Base/Zone/Section"
 
     # 2. Create a Bounding Box
     bbox_path = "/World/CAE/BoundingBox_NumPyDataSet"
@@ -91,7 +86,7 @@ async def main(skip_play: bool = False):
         cae_viz.FieldSelectionAPI, "velocities"
     ), "Should have FieldSelectionAPI for velocities"
     velocities_fs_api = cae_viz.FieldSelectionAPI(ds_emitter_prim, "velocities")
-    velocities_fs_api.CreateTargetRel().SetTargets([f"{array_base_path}/V"])
+    velocities_fs_api.CreateFieldNamesAttr().Set(["V"])
     await wait_for_update()
 
     # 8. Select the smoke injector

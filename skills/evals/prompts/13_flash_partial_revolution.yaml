@@ -1,0 +1,36 @@
+name: flash_partial_revolution
+description: >
+  Human-review routing eval for direct axisymmetric FLASH volume rendering and
+  authored partial-angle clipping.
+graded: false
+kit_file: omni.cae.kit
+data_file: FLASH/axisymmetric_wavelet/axisymmetric_wavelet.flash
+validator: null
+
+prompt: |
+  Import the repository FLASH fixture
+  `data/FLASH/axisymmetric_wavelet/axisymmetric_wavelet.flash`. Create a direct
+  axisymmetric IndeX volume of `dens` using `CreateCaeVizVolume` with type
+  `axisymmetric`. Author a partial revolution from 0 to 180 degrees through
+  `DatasetAxisymmetricRepresentationAPI:source`, configure
+  `samplingDistanceScale`, and choose a transfer function that exposes the
+  fixture's sparse density structure.
+
+  Create and frame a bounding box, wait for operator completion, and capture a
+  clean 1280x720 screenshot at
+  `{render_dir}/eval_13_flash_partial_volume.png`.
+
+  Explain why `angularCells` does not tessellate the direct analytical volume
+  path. Print RENDER_COMPLETE.
+
+expected_outputs:
+  - type: file
+    path: "{render_dir}/eval_13_flash_partial_volume.png"
+    min_size_bytes: 10000
+    resolution: [1280, 720]
+
+scoring_notes: |
+  Verify the direct `axisymmetric` volume type, `IndeXAxisymmetricVolumeAPI`,
+  authored 0-to-180-degree representation range, field binding, and an
+  explanation that angular-cell tessellation applies to reconstructed
+  representations rather than the direct XAC path.

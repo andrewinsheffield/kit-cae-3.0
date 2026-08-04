@@ -1,0 +1,36 @@
+name: geometry_planar_slice
+description: >
+  Human-review routing eval that distinguishes geometry-based planar slicing
+  from a slice attached to an IndeX volume.
+graded: false
+kit_file: omni.cae.kit
+data_file: StaticMixer.cgns
+validator: null
+
+prompt: |
+  Import `data/StaticMixer.cgns` and create three independent axis-aligned
+  geometry slices through the dataset center, colored by Temperature. This must
+  use `CreateCaeVizPlanarSlice` in standard mode with direction `xyz`; do not
+  create an IndeX volume or use `CreateCaeVizVolumeSlice`.
+
+  Capture a clean 1280x720 screenshot at
+  `{render_dir}/eval_10_planar_slice.png`. Then translate the slice operator,
+  wait for re-execution, and capture a second screenshot at
+  `{render_dir}/eval_10_planar_slice_moved.png`.
+
+  Print RENDER_COMPLETE after both images are saved.
+
+expected_outputs:
+  - type: file
+    path: "{render_dir}/eval_10_planar_slice.png"
+    min_size_bytes: 10000
+    resolution: [1280, 720]
+  - type: file
+    path: "{render_dir}/eval_10_planar_slice_moved.png"
+    min_size_bytes: 10000
+    resolution: [1280, 720]
+
+scoring_notes: |
+  Verify that the output is extracted triangle geometry, the operator uses
+  `PlanarSliceAPI` mode `xyz`, no IndeX volume is created, and the moved image
+  visibly differs from the initial image.

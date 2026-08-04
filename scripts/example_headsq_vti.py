@@ -10,32 +10,31 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.vtk import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
 from pxr import Sdf, Usd, UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
-# ./repo.sh launch -n omni.cae_vtk.kit -- --exec scripts/example_headsq_vti.py
+# ./repo.sh launch -n omni.cae.kit -- --exec scripts/example_headsq_vti.py
 
 
 async def main():
-    # 0. Import the VTI file
+    # 1. Import the VTI file through the native OpenUSD file-format plugin
     vti_path = get_test_data_path("headsq.vti")
     await import_to_stage(vti_path, "/World/headsq_vti")
 
     ctx = get_context()
     stage: Usd.Stage = ctx.get_stage()
+    UsdGeom.Xform.Define(stage, "/World/CAE")
 
-    # 2. Generate the volume data
-    dataset_path = "/World/headsq_vti/VTKImageData"
+    dataset_path = "/World/headsq_vti"
     viz_path = "/World/CAE/NanoVdbIndeXVolume_VTKImageData"
-    scalars_path = "/World/headsq_vti/PointData/Scalars_"
 
-    # 1. Create Bounding Box
+    # 2. Create Bounding Box
     bbox_path = "/World/CAE/BoundingBox_VTKDataSet"
     await execute_command("CreateCaeVizBoundingBox", dataset_paths=[dataset_path], prim_path=bbox_path)
     await wait_for_update()
@@ -61,7 +60,7 @@ async def main():
 
     assert viz_prim.HasAPI(cae_viz.FieldSelectionAPI, "colors"), "Should have FieldSelectionAPI for colors"
     colors_fs_api = cae_viz.FieldSelectionAPI(viz_prim, "colors")
-    colors_fs_api.CreateTargetRel().SetTargets([scalars_path])
+    colors_fs_api.CreateFieldNamesAttr().Set(["Scalars_"])
 
     # 7. Set the ROI
     assert viz_prim.HasAPI(cae_viz.DatasetVoxelizationAPI, "source"), "Should have DatasetVoxelizationAPI for source"

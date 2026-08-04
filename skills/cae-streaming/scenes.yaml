@@ -14,7 +14,7 @@
 #       dataset_path:          Prim with the dataset (per-format; see formats.md).
 #       default_viz:           Short label appended to the viz prim path.
 #       default_viz_command:   One of the CreateCaeViz* commands from cae-visualization.
-#       schema_type:           NPZ-only. "Point Cloud" or "SIDS Unstructured".
+#       schema:                NPZ-only. "Point Cloud", "CGNS", or "None".
 #
 # These dataset paths come from the example scripts shipped with Kit-CAE. If you
 # point at a different file you MUST verify the path with the inspect scripts in
@@ -33,10 +33,10 @@ scenes:
   disk_out_ref:
     path: "${KIT_CAE_DIR}/data/disk_out_ref.npz"
     format: npz
-    schema_type: "Point Cloud"
+    schema: "Point Cloud"
     prim_path: /World/disk_out_ref_npz
     # See scripts/example_npz_point_cloud.py.
-    dataset_path: /World/disk_out_ref_npz/NumPyDataSet
+    dataset_path: /World/disk_out_ref_npz
     default_viz: Volume
     default_viz_command: CreateCaeVizVolume
     default_viz_kwargs:

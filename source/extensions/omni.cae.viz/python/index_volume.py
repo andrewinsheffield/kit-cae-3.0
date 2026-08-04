@@ -11,13 +11,13 @@
 from logging import getLogger
 from typing import Any
 
-import dav
 import numpy as np
 import warp as wp
-from omni.cae.data import array_utils, cache, progress, usd_utils
-from omni.cae.dav import index_utils as dav_index_utils
+import warp_simdata as simdata
+from omni.cae.core import array_utils, cache, progress, usd_utils
 from omni.cae.index import bindings as index_bindings
 from omni.cae.schema import viz as cae_viz
+from omni.cae.simdata import index_utils as simdata_index_utils
 from omni.usd import get_context
 from pxr import Sdf, Usd, UsdShade, UsdVol, Vt
 
@@ -55,7 +55,7 @@ class IndeXVolume:
         else:
             return "irregular_volume"
 
-    async def get_source(self, prim: Usd.Prim, timeCode: Usd.TimeCode, device: str) -> dav.Dataset:
+    async def get_source(self, prim: Usd.Prim, timeCode: Usd.TimeCode, device: str) -> simdata.Dataset:
         return await viz_utils.get_input_dataset(prim, "source", timeCode=timeCode, device=device)
 
     async def exec(self, prim: Usd.Prim, device: str, context: ExecutionContext):
@@ -84,7 +84,7 @@ class IndeXVolume:
         # place current timecode in cache; this is used by the compute task to pass fields to IndeX
         cache.put(cache_key, source_dataset, timeCode=context.timecode, consumerPrims=[prim], force=True)
 
-        with progress.ProgressContext("Executing DAV [compute bounds]"):
+        with progress.ProgressContext("Executing SimData [compute bounds]"):
             bds = source_dataset.get_bounds()
 
         # block change to package all changes into a single pass.
@@ -146,7 +146,7 @@ class IndeXVolume:
         self,
         prim: Usd.Prim,
         importer: Usd.Prim,
-        source_dataset: dav.Dataset,
+        source_dataset: simdata.Dataset,
         nv_volume_type: str,
         cache_key: str,
     ):
@@ -277,7 +277,7 @@ class IndeXBase:
     def has_source_dataset(self) -> bool:
         return self.get_source_dataset() is not None
 
-    def get_source_dataset(self) -> dav.Dataset:
+    def get_source_dataset(self) -> simdata.Dataset:
         return cache.get(self.cache_key, timeCode=self.get_time_code())
 
     def has_next_time_code(self) -> bool:
@@ -288,7 +288,7 @@ class IndeXBase:
         next_tc = self.params.get("next_time_code", None)
         return next_tc is not None and str(next_tc) != str(None)
 
-    def get_next_source_dataset(self) -> dav.Dataset:
+    def get_next_source_dataset(self) -> simdata.Dataset:
         return cache.get(self.cache_key, timeCode=self.get_next_time_code())
 
 
@@ -311,12 +311,12 @@ class IndeXImporter_irregular_volume(IndeXBase):
         subset: index_bindings.IIrregular_volume_subset = factory.create_irregular_volume_subset()
 
         # count faces and face vertices
-        nb_faces, nb_face_vertices = dav_index_utils.compute_face_summary(source_dataset)
+        nb_faces, nb_face_vertices = simdata_index_utils.compute_face_summary(source_dataset)
         logger.info(f"nb_faces: {nb_faces:,}, nb_face_vertices: {nb_face_vertices:,}")
 
         params = index_bindings.Mesh_parameters()
-        params.nb_vertices = source_dataset.get_num_points()
-        params.nb_cells = source_dataset.get_num_cells()
+        params.nb_vertices = source_dataset.get_num_nodes()
+        params.nb_cells = source_dataset.get_num_elems()
         params.nb_faces = nb_faces
         params.nb_face_vtx_indices = nb_face_vertices
         params.nb_cell_face_indices = nb_faces  # since we won't be sharing faces
@@ -324,18 +324,20 @@ class IndeXImporter_irregular_volume(IndeXBase):
         logger.info(f"Mesh parameters: {params}")
 
         storage: index_bindings.Mesh_storage = subset.generate_mesh_storage(params)
-        dav_index_utils.populate_mesh_storage(source_dataset, storage)
+        simdata_index_utils.populate_mesh_storage(source_dataset, storage)
 
         instance_names = usd_utils.get_instances(volume_prim, "CaeVizFieldSelectionAPI")
 
         # Allocate attributes for current timestep
-        dav_index_utils.allocate_attribute_storage(source_dataset, subset, instance_names, start_index=0)
+        simdata_index_utils.allocate_attribute_storage(source_dataset, subset, instance_names, start_index=0)
 
         # If temporal field interpolation is enabled, allocate attributes for next timestep too
         if self.params.get("enable_field_interpolation", False):
             # Use the same source_dataset for allocation (structure is identical)
             num_fields = len(instance_names)
-            dav_index_utils.allocate_attribute_storage(source_dataset, subset, instance_names, start_index=num_fields)
+            simdata_index_utils.allocate_attribute_storage(
+                source_dataset, subset, instance_names, start_index=num_fields
+            )
 
         return subset
 
@@ -359,7 +361,7 @@ class IndeXComputeTask_irregular_volume(IndeXBase):
 
             for ds_idx, dataset in enumerate(datasets):
                 start_index = ds_idx * len(instance_names)
-                dav_index_utils.fill_attribute_storage(dataset, subset, instance_names, start_index)
+                simdata_index_utils.fill_attribute_storage(dataset, subset, instance_names, start_index)
 
         except Exception as e:
             logger.error(f"Failed to launch IndeXComputeTask_irregular_volume: {e}")
@@ -396,25 +398,24 @@ class IndeXComputeTask_vdb(IndeXBase):
                     if dataset.has_field(field_name):
                         field = dataset.get_field(field_name)
                         volume: wp.Volume = field.get_data()
-                        # note: farray holds a reference to volume so we don't need to cache it
-                        farray = array_utils.get_nanovdb_as_field_array(volume)
+                        dlpack_array = array_utils.get_nanovdb_dlpack_array(volume)
+                        target_device = wp.get_cuda_device(device_id)
 
-                        # ensure the field array is on the correct device
-                        if farray.device_id != device_id:
+                        if dlpack_array.device != target_device:
                             logger.info(
-                                f"Moving field array for '{field_name}' to device {device_id} (source: {farray.device_id})"
+                                f"Moving NanoVDB grid buffer for '{field_name}' to device {device_id} "
+                                f"(source: {dlpack_array.device})"
                             )
-                            farray = farray.to_device(device_id)
-                            cached_items.append(farray)
-                        else:
-                            cached_items.append(farray)
+                            dlpack_array = dlpack_array.to(target_device)
 
-                        device_subset.adopt_field_array(ds_idx * len(instance_names) + idx, farray)
+                        with dlpack_array.device.context_guard:
+                            adoption = device_subset.adopt_dlpack(ds_idx * len(instance_names) + idx, dlpack_array)
+                        cached_items.append(adoption)
                     else:
                         logger.error(f"Field {field_name} not found in source dataset")
 
             # update the cached items until next invocation;
-            # this is necessary since `adopt_field_array` does not copy the data or take ownership of the field array.
+            # this is necessary since `adopt_dlpack` does not copy the data or take ownership of the buffer.
             # We set it up to automatically remove from cache when the volume prim is deleted. This is
             # very conservative but this avoid race condition when compute task is deleted but
             # the volume may still be need for rendering.

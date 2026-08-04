@@ -4,12 +4,21 @@ All notable changes to the CAE Extension Bundle will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [2.1.1]
+## [3.1.0]
 
-- Updated the Kit-CAE release to support Kit SDK 110.1.2 as the default SDK, including refreshed app and
-  streaming template support.
-- Fixed bundle compatibility with Warp 1.13 by including the CAE data dtype/device helper updates required by
-  the newer Warp API and the updated bundled DAV runtime.
+- Reorganized dependencies for the new layered architecture: pulls in `omni.cae.usd_plugins`
+  (load-ordered alongside the schemas), `omni.cae.core`, and `omni.cae.usd_plugins_importers`,
+  and drops the per-format `omni.cae.data`, `omni.cae.file_format.cgns`, `omni.cae.delegate.*`,
+  `omni.cae.importer.*`, and `omni.cae.index` direct dependencies — those flow in through the
+  USD-plugin importers and core stacks instead.
+- Dropped the bundled `rtx.hydra.readTransformsFromFabricInRenderDelegate` setting that the IndeX
+  bundle previously required.
+
+## [3.0.0]
+
+- Removed dependencies on legacy CAE extensions. The bundle now loads the current schema, data delegate, DAV, importer,
+  delegate, visualization, and UI stack only.
+- Updated bundled settings text for RT-backed visualization operators.
 
 ## [2.1.0]
 

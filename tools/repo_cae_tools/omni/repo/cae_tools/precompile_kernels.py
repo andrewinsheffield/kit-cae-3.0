@@ -10,8 +10,8 @@
 
 """Precompile WARP kernels tool for Kit-CAE.
 
-Launches kit with omni.cae.dav_libs and omni.cae.data enabled, then executes
-dav.aot_compile inside kit to compile Warp kernels ahead of time.
+Launches kit with omni.cae.simdata and omni.cae.core enabled, then executes
+warp_simdata.aot_compile inside kit to compile Warp kernels ahead of time.
 
 Usage:
     ./repo.sh precompile_kernels --json aot_config.json
@@ -42,7 +42,7 @@ console = Console(theme=Theme())
 
 
 def run_repo_tool(options, config):
-    """Launch kit with omni.cae.dav_libs + omni.cae.data and run aot_compile."""
+    """Launch kit with omni.cae.simdata + omni.cae.core and run aot_compile."""
     console.print("[precompile_kernels] Precompiling kernels", style=INFO_COLOR)
 
     tool_config = config.get("repo_precompile_kernels", {})
@@ -84,15 +84,15 @@ def run_repo_tool(options, config):
 
     # Pass arguments to the kit-side script via environment variables.
     # kit's --exec does not forward argv to the executed script.
-    os.environ["DAV_COMPILE_KERNELS_AOT"] = "1"
+    os.environ["WARP_SIMDATA_COMPILE_KERNELS_AOT"] = "1"
     os.environ["PRECOMPILE_KERNELS_JSON"] = json_path
     os.environ["PRECOMPILE_KERNELS_DEVICES"] = " ".join(devices)
     if kernel_cache_dir:
         os.environ["WARP_CACHE_PATH"] = kernel_cache_dir
 
     cmd = [kit_exe]
-    cmd += ["--enable", "omni.cae.dav_libs"]
-    cmd += ["--enable", "omni.cae.data"]
+    cmd += ["--enable", "omni.cae.simdata"]
+    cmd += ["--enable", "omni.cae.core"]
     for folder in ext_folders:
         cmd += ["--ext-folder", resolve_tokens(folder)]
     cmd += ["--portable-root", build_dir + "/"]
@@ -109,13 +109,13 @@ def run_repo_tool(options, config):
 def setup_repo_tool(parser, config):
     """Set up the precompile_kernels command."""
     tool_config = config.get("repo_precompile_kernels", {})
-    parser.description = "Precompile Warp kernels by launching kit with omni.cae.dav_libs and omni.cae.data."
+    parser.description = "Precompile Warp kernels by launching kit with omni.cae.simdata and omni.cae.core."
     omni.repo.man.add_config_arg(parser)
     parser.add_argument(
         "--json",
         default=None,
         metavar="PATH",
-        help="Path to the AOT configuration JSON file (produced by dav.recorder). "
+        help="Path to the AOT configuration JSON file (produced by warp_simdata.core.recorder). "
         "Falls back to 'json' in [repo_precompile_kernels] if omitted.",
     )
     parser.add_argument(

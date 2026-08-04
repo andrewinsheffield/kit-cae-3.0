@@ -15,7 +15,7 @@ This document describes the implementation of temporal execution optimization fo
 - `on_time_changed()` hook for lightweight updates (called even when exec skips)
 - Field interpolation support with dual-timestep attribute allocation
 - Both `IrregularVolume` and `NanoVDBVolume` support temporal mode
-- Timecode snapping via `get_bracketing_time_codes()`
+- Timecode snapping via C++-backed `get_bracketing_time_samples_for_prim()`
 - All operators migrated to use `ExecutionContext` (required parameter)
 
 ## Core Concept
@@ -44,7 +44,7 @@ class ExecutionReason(Enum):
 @dataclass
 class ExecutionContext:
     reason: ExecutionReason
-    timecode: Usd.TimeCode              # Snapped timecode (from get_bracketing_time_codes)
+    timecode: Usd.TimeCode              # Snapped timecode (from get_bracketing_time_samples_for_prim)
     raw_timecode: Usd.TimeCode          # Original timeline timecode
     next_time_code: Optional[Usd.TimeCode]  # Next bracketing timecode (if available)
     device: str
@@ -142,7 +142,7 @@ New method `_build_execution_context()` is a **generator** that yields one or mo
    - Operator must have `supports_temporal=True`
    - `CaeVizOperatorTemporalAPI` may be applied with `enableFieldInterpolation=True`
 
-3. **Timecode snapping**: All timecodes are snapped using `get_bracketing_time_codes()` to align with actual time samples
+3. **Timecode snapping**: All timecodes are snapped using `get_bracketing_time_samples_for_prim()` to align with actual time samples
 
 4. **If temporal mode active**:
    - Check if `current_time_code` has been executed → If not, yield TEMPORAL_UPDATE
@@ -242,14 +242,14 @@ class IndeXImporter_irregular_volume(IndeXBase):
         # ... mesh setup ...
 
         # Allocate attributes for current timestep
-        dav_index_utils.allocate_attribute_storage(
+        simdata_index_utils.allocate_attribute_storage(
             source_dataset, subset, instance_names, start_index=0
         )
 
         # If temporal interpolation enabled, allocate for next timestep too
         if self.params.get("enable_field_interpolation", False):
             num_fields = len(instance_names)
-            dav_index_utils.allocate_attribute_storage(
+            simdata_index_utils.allocate_attribute_storage(
                 source_dataset, subset, instance_names, start_index=num_fields
             )
 
@@ -268,7 +268,7 @@ class IndeXComputeTask_irregular_volume(IndeXBase):
         # Fill attributes with offset for each timestep
         for ds_idx, dataset in enumerate(datasets):
             start_index = ds_idx * len(instance_names)
-            dav_index_utils.fill_attribute_storage(
+            simdata_index_utils.fill_attribute_storage(
                 dataset, subset, instance_names, start_index
             )
 ```
@@ -375,16 +375,19 @@ class "CaeVizOperatorTemporalAPI" (
 - `python/streamlines.py` - Modified: Updated exec() signature to use ExecutionContext
 - `python/points.py` - Modified: Updated exec() signature to use ExecutionContext
 - `python/flow_emitters.py` - Modified: Updated exec() signature to use ExecutionContext
-- `omni.cae.dav/python/index_utils.py` - Modified: Added start_index parameter to allocate_attribute_storage()
+- `omni.cae.simdata/python/index_utils.py` - Modified: Added start_index parameter to allocate_attribute_storage()
 
 ## Key Implementation Details
 
 ### Timecode Handling
 
-All timecode snapping happens in `_build_execution_context()` via `get_bracketing_time_codes()`:
+All timecode snapping happens in `_build_execution_context()` via `get_bracketing_time_samples_for_prim()`:
 - `context.timecode`: Snapped to actual time sample (current)
 - `context.raw_timecode`: Original timeline position
 - `context.next_time_code`: Snapped to next time sample (if available, for interpolation)
+
+The C++-backed helper returns `(lower, upper, has_time_samples)` as numeric sample values. The controller converts
+`lower` and `upper` to `Usd.TimeCode` for the execution context.
 
 Operators should always use `context.timecode` for data loading and should pass `context.next_time_code` to systems that need interpolation support.
 

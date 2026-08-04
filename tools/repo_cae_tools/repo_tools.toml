@@ -80,7 +80,6 @@ enabled = true
 # default paths to search for apps and extensions
 ext_folders = [
   "${root}/source/extensions",
-  "${root}/source/legacy_extensions",
   "${root}/source/apps",
 ]
 pkg_version_md = "${root}/tools/VERSION.md"
@@ -107,7 +106,7 @@ ext_folders = [
 # Script executed inside kit after startup
 script = "${root}/tools/repo_cae_tools/scripts/precompile_kernels_script.py"
 
-# Default AOT configuration JSON (produced by dav.recorder). Override with --json on the command line.
+# Default AOT configuration JSON (produced by warp_simdata.core.recorder). Override with --json on the command line.
 # json = "${root}/aot_config.json"
 
 # Default Warp devices to compile for. Override with --devices on the command line.

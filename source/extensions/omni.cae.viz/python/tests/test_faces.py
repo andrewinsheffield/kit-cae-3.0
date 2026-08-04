@@ -8,20 +8,23 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-import asyncio
-
 import numpy as np
 import omni.kit.test
-import warp as wp
-from omni.cae.data import usd_utils
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core import usd_utils
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
-from omni.cae.testing import get_test_data_path, get_vtrt_array_as_numpy, new_stage, wait_for_update
-from omni.kit.app import get_app
+from omni.cae.testing import get_test_data_path, new_stage, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_stage_next_free_path
 from pxr import Usd, UsdShade
 from usdrt import UsdGeom as UsdGeomRT
+
+from ._operator_test_utils import read_rt_array, wait_for_operator_complete
+from ._usd_plugin_test_utils import import_animated_beam_sequence
+
+
+def _set_field_names(field_selection_api: cae_viz.FieldSelectionAPI, *names: str) -> None:
+    field_selection_api.CreateFieldNamesAttr().Set(list(names))
 
 
 class TestFaces(omni.kit.test.AsyncTestCase):
@@ -32,14 +35,15 @@ class TestFaces(omni.kit.test.AsyncTestCase):
         self.assertIsNotNone(ds_prim, "Dataset prim should be valid")
 
         viz_path = get_stage_next_free_path(stage, f"/World/CAE/Faces_{ds_prim.GetName()}", False)
-        await execute_command("CreateCaeVizFaces", dataset_path=dataset_path, prim_path=viz_path)
+
+        async with wait_for_operator_complete(viz_path):
+            await execute_command("CreateCaeVizFaces", dataset_path=dataset_path, prim_path=viz_path)
+            prim = stage.GetPrimAtPath(viz_path)
+            faces_api = cae_viz.FacesAPI(prim)
+            faces_api.CreateExternalOnlyAttr().Set(external_only)
 
         prim = stage.GetPrimAtPath(viz_path)
         self.assertIsNotNone(prim, "Faces prim should be valid")
-        faces_api = cae_viz.FacesAPI(prim)
-        faces_api.CreateExternalOnlyAttr().Set(external_only)
-
-        await wait_for_update()
         return prim
 
     async def test_faces_static_mixer(self):
@@ -54,7 +58,7 @@ class TestFaces(omni.kit.test.AsyncTestCase):
             mesh_rt = UsdGeomRT.Mesh(prim_rt)
 
             # Verify points are populated
-            np_points = get_vtrt_array_as_numpy(mesh_rt.GetPointsAttr())
+            np_points = read_rt_array(mesh_rt.GetPointsAttr(), "faces points")
             self.assertIsNotNone(np_points)
             self.assertEqual(np_points.shape[1], 3, "Points should have 3 components (x, y, z)")
             self.assertEqual(np_points.shape[0], 802, "Should have 802 points")
@@ -64,14 +68,14 @@ class TestFaces(omni.kit.test.AsyncTestCase):
             np.testing.assert_allclose(np_points.max(axis=0).tolist(), [2.0, 3.0, 2.0], atol=self.tolerance)
 
             # Verify face vertex counts
-            np_face_vertex_counts = get_vtrt_array_as_numpy(mesh_rt.GetFaceVertexCountsAttr())
+            np_face_vertex_counts = read_rt_array(mesh_rt.GetFaceVertexCountsAttr(), "face vertex counts")
             self.assertIsNotNone(np_face_vertex_counts)
             self.assertEqual(np_face_vertex_counts.shape[0], 1582, "Should have 1582 faces")
             # Each face should have exactly 3 vertices
             self.assertTrue(np.allclose(np_face_vertex_counts, 3), "All faces should have exactly 3 vertices")
 
             # Verify face vertex indices
-            np_face_vertex_indices = get_vtrt_array_as_numpy(mesh_rt.GetFaceVertexIndicesAttr())
+            np_face_vertex_indices = read_rt_array(mesh_rt.GetFaceVertexIndicesAttr(), "face vertex indices")
             self.assertIsNotNone(np_face_vertex_indices)
             self.assertGreater(np_face_vertex_indices.shape[0], 0, "Should have face vertex indices")
             # Sum of face vertex counts should equal the number of face vertex indices
@@ -91,7 +95,6 @@ class TestFaces(omni.kit.test.AsyncTestCase):
         async with new_stage() as stage:
             await import_to_stage(get_test_data_path("StaticMixer.cgns"), "/World/StaticMixer")
             dataset_path = "/World/StaticMixer/Base/StaticMixer/StaticMixer_Default"
-            temp_path = "/World/StaticMixer/Base/StaticMixer/Flow_Solution/Temperature"
             prim = await self.create_faces(stage, dataset_path)
             self.assertTrue(prim.HasAPI(cae_viz.FacesAPI))
 
@@ -106,11 +109,11 @@ class TestFaces(omni.kit.test.AsyncTestCase):
 
             # add colors
             colors_fs_api = cae_viz.FieldSelectionAPI(prim, "colors")
-            colors_fs_api.CreateTargetRel().SetTargets([temp_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(str(prim.GetPath())):
+                _set_field_names(colors_fs_api, "Temperature")
             self.assertTrue(prim_rt.GetAttribute("primvars:colors").IsValid())
 
-            np_colors = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors"))
+            np_colors = read_rt_array(prim_rt.GetAttribute("primvars:colors"), "faces colors")
             self.assertIsNotNone(np_colors)
             self.assertGreater(np_colors.shape[0], 0, "Should have color values")
             self.assertEqual(np_colors.shape[1], 1, "Colors should be scalar (1 component)")
@@ -124,16 +127,36 @@ class TestFaces(omni.kit.test.AsyncTestCase):
             self.assertTrue(shader.GetInput("enable_coloring").Get() == True)
 
             # Now remove colors, and confirm that shader's enable_coloring is false
-            colors_fs_api.GetTargetRel().ClearTargets(False)
-            await wait_for_update()
+            async with wait_for_operator_complete(str(prim.GetPath())):
+                _set_field_names(colors_fs_api)
 
             # this will not drop the primvar, but the shader's enable_coloring will be false
             self.assertTrue(prim_rt.GetAttribute("primvars:colors").IsValid())
             self.assertTrue(shader.GetInput("enable_coloring").Get() == False)
 
+    async def test_faces_static_mixer_with_opacity(self):
+        async with new_stage() as stage:
+            await import_to_stage(get_test_data_path("StaticMixer.cgns"), "/World/StaticMixer")
+            dataset_path = "/World/StaticMixer/Base/StaticMixer/StaticMixer_Default"
+            prim = await self.create_faces(stage, dataset_path)
+            prim_rt = usd_utils.get_prim_rt(prim)
+            shader = UsdShade.Shader(prim.GetPrimAtPath("Materials/ScalarColor/Shader"))
+            self.assertFalse(shader.GetInput("enable_opacity").Get())
+
+            async with wait_for_operator_complete(str(prim.GetPath())):
+                _set_field_names(cae_viz.FieldSelectionAPI(prim, "opacity"), "Temperature")
+
+            opacity = read_rt_array(prim_rt.GetAttribute("primvars:opacity"), "faces opacity")
+            self.assertGreater(opacity.shape[0], 0)
+            self.assertEqual(opacity.shape[1], 1)
+            np.testing.assert_allclose(opacity.min(axis=0).tolist(), 285.0, atol=self.tolerance)
+            np.testing.assert_allclose(opacity.max(axis=0).tolist(), 315.000458, atol=self.tolerance)
+            self.assertTrue(shader.GetInput("enable_opacity").Get())
+            np.testing.assert_allclose(shader.GetInput("opacity_domain").Get(), [285.0, 315.000458], atol=1e-3)
+
     async def test_faces_animated_beam(self):
         """Test Faces operator with animated beam dataset to verify temporal updates and interpolation."""
-        async with new_stage(path=get_test_data_path("animated_beam/animated_beam.usda")) as stage:
+        async with new_stage() as stage:
             from omni.timeline import get_timeline_interface
 
             # set up timeline; we use time_codes_per_second of 1.0 for convenience
@@ -144,8 +167,7 @@ class TestFaces(omni.kit.test.AsyncTestCase):
             timeline.set_current_time(0.0)
             await wait_for_update()
 
-            ds_path = "/World/animated_beam_vtu/VTKUnstructuredGrid"
-            rtdata_path = "/World/animated_beam_vtu/PointData/RTData"
+            ds_path = await import_animated_beam_sequence(stage)
             prim = await self.create_faces(stage, ds_path, external_only=False)
             self.assertTrue(prim.HasAPI(cae_viz.FacesAPI))
 
@@ -154,12 +176,12 @@ class TestFaces(omni.kit.test.AsyncTestCase):
 
             # Add colors mapped to RTData (time-varying)
             colors_fs_api = cae_viz.FieldSelectionAPI(prim, "colors")
-            colors_fs_api.CreateTargetRel().SetTargets([rtdata_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(str(prim.GetPath())):
+                _set_field_names(colors_fs_api, "RTData")
 
             # Get initial points and colors at time 0
-            np_points_t0 = get_vtrt_array_as_numpy(mesh_rt.GetPointsAttr()).copy()
-            np_colors_t0 = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors")).copy()
+            np_points_t0 = read_rt_array(mesh_rt.GetPointsAttr(), "faces points t0").copy()
+            np_colors_t0 = read_rt_array(prim_rt.GetAttribute("primvars:colors"), "faces colors t0").copy()
             self.assertIsNotNone(np_points_t0)
             self.assertIsNotNone(np_colors_t0)
             self.assertGreater(np_points_t0.shape[0], 0, "Should have points")
@@ -175,8 +197,8 @@ class TestFaces(omni.kit.test.AsyncTestCase):
                 timeline.forward_one_frame()
             await wait_for_update()
 
-            np_points_t5 = get_vtrt_array_as_numpy(mesh_rt.GetPointsAttr())
-            np_colors_t5 = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors"))
+            np_points_t5 = read_rt_array(mesh_rt.GetPointsAttr(), "faces points t5")
+            np_colors_t5 = read_rt_array(prim_rt.GetAttribute("primvars:colors"), "faces colors t5")
             np.testing.assert_allclose(np_points_t5, np_points_t0, atol=self.tolerance)
             np.testing.assert_allclose(np_colors_t5, np_colors_t0, atol=self.tolerance)
 
@@ -185,8 +207,8 @@ class TestFaces(omni.kit.test.AsyncTestCase):
                 timeline.forward_one_frame()
             await wait_for_update()
 
-            np_points_t10 = get_vtrt_array_as_numpy(mesh_rt.GetPointsAttr()).copy()
-            np_colors_t10 = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors")).copy()
+            np_points_t10 = read_rt_array(mesh_rt.GetPointsAttr(), "faces points t10").copy()
+            np_colors_t10 = read_rt_array(prim_rt.GetAttribute("primvars:colors"), "faces colors t10").copy()
             self.assertIsNotNone(np_points_t10)
             self.assertIsNotNone(np_colors_t10)
 
@@ -199,17 +221,17 @@ class TestFaces(omni.kit.test.AsyncTestCase):
             self.assertFalse(np.allclose(np_colors_t10, np_colors_t0, atol=self.tolerance))
 
             # Reset timeline and enable temporal interpolation
-            timeline.set_current_time(0.0)
-            await wait_for_update()
+            async with wait_for_operator_complete(str(prim.GetPath())):
+                timeline.set_current_time(0.0)
 
-            cae_viz.OperatorTemporalAPI.Apply(prim)
-            temporal_api = cae_viz.OperatorTemporalAPI(prim)
-            temporal_api.CreateEnableFieldInterpolationAttr().Set(True)
-            await wait_for_update()
+            async with wait_for_operator_complete(str(prim.GetPath())):
+                cae_viz.OperatorTemporalAPI.Apply(prim)
+                temporal_api = cae_viz.OperatorTemporalAPI(prim)
+                temporal_api.CreateEnableFieldInterpolationAttr().Set(True)
 
             # Verify we're back at time 0
-            np_points_t0_interp = get_vtrt_array_as_numpy(mesh_rt.GetPointsAttr())
-            np_colors_t0_interp = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors"))
+            np_points_t0_interp = read_rt_array(mesh_rt.GetPointsAttr(), "faces points t0 interpolated")
+            np_colors_t0_interp = read_rt_array(prim_rt.GetAttribute("primvars:colors"), "faces colors t0 interpolated")
             np.testing.assert_allclose(np_points_t0_interp, np_points_t0, atol=self.tolerance)
             np.testing.assert_allclose(np_colors_t0_interp, np_colors_t0, atol=self.tolerance)
 
@@ -219,8 +241,8 @@ class TestFaces(omni.kit.test.AsyncTestCase):
                 timeline.forward_one_frame()
             await wait_for_update()
 
-            np_points_t5_interp = get_vtrt_array_as_numpy(mesh_rt.GetPointsAttr())
-            np_colors_t5_interp = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors"))
+            np_points_t5_interp = read_rt_array(mesh_rt.GetPointsAttr(), "faces points t5 interpolated")
+            np_colors_t5_interp = read_rt_array(prim_rt.GetAttribute("primvars:colors"), "faces colors t5 interpolated")
             self.assertIsNotNone(np_points_t5_interp)
             self.assertIsNotNone(np_colors_t5_interp)
 
@@ -243,8 +265,10 @@ class TestFaces(omni.kit.test.AsyncTestCase):
                 timeline.forward_one_frame()
             await wait_for_update()
 
-            np_points_t10_interp = get_vtrt_array_as_numpy(mesh_rt.GetPointsAttr())
-            np_colors_t10_interp = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors"))
+            np_points_t10_interp = read_rt_array(mesh_rt.GetPointsAttr(), "faces points t10 interpolated")
+            np_colors_t10_interp = read_rt_array(
+                prim_rt.GetAttribute("primvars:colors"), "faces colors t10 interpolated"
+            )
 
             # Points and colors at time 10 should match the keyframe values
             np.testing.assert_allclose(np_points_t10_interp, np_points_t10, atol=self.tolerance)
@@ -255,8 +279,6 @@ class TestFaces(omni.kit.test.AsyncTestCase):
         async with new_stage() as stage:
             await import_to_stage(get_test_data_path("hex_timesteps.cgns"), "/World/hex_timesteps")
             dataset_path = "/World/hex_timesteps/Base/Zone/ElementsUniform"
-            point_field_path = "/World/hex_timesteps/Base/Zone/SolutionVertex0001/PointSinusoid"
-            cell_field_path = "/World/hex_timesteps/Base/Zone/SolutionCellCenter0001/CellSinusoid"
 
             prim = await self.create_faces(stage, dataset_path, external_only=False)
             self.assertTrue(prim.HasAPI(cae_viz.FacesAPI))
@@ -265,8 +287,8 @@ class TestFaces(omni.kit.test.AsyncTestCase):
             mesh_rt = UsdGeomRT.Mesh(prim_rt)
 
             # Get the mesh topology info
-            np_points = get_vtrt_array_as_numpy(mesh_rt.GetPointsAttr())
-            np_face_vertex_counts = get_vtrt_array_as_numpy(mesh_rt.GetFaceVertexCountsAttr())
+            np_points = read_rt_array(mesh_rt.GetPointsAttr(), "faces points")
+            np_face_vertex_counts = read_rt_array(mesh_rt.GetFaceVertexCountsAttr(), "face vertex counts")
             self.assertIsNotNone(np_points)
             self.assertIsNotNone(np_face_vertex_counts)
             num_points = np_points.shape[0]
@@ -277,12 +299,12 @@ class TestFaces(omni.kit.test.AsyncTestCase):
 
             # Test 1: Color by point data
             colors_fs_api = cae_viz.FieldSelectionAPI(prim, "colors")
-            colors_fs_api.CreateTargetRel().SetTargets([point_field_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(str(prim.GetPath())):
+                _set_field_names(colors_fs_api, "PointSinusoid")
 
             # Verify colors primvar exists and has point data characteristics
             self.assertTrue(prim_rt.GetAttribute("primvars:colors").IsValid())
-            np_colors = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors"))
+            np_colors = read_rt_array(prim_rt.GetAttribute("primvars:colors"), "point data colors")
             self.assertIsNotNone(np_colors)
 
             # Colors should match number of points
@@ -294,12 +316,12 @@ class TestFaces(omni.kit.test.AsyncTestCase):
             self.assertEqual(colors_interp, "vertex", "Interpolation should be 'vertex' for point data")
 
             # Test 2: Switch to cell data
-            colors_fs_api.GetTargetRel().SetTargets([cell_field_path])
-            await wait_for_update()
+            async with wait_for_operator_complete(str(prim.GetPath())):
+                _set_field_names(colors_fs_api, "CellSinusoid")
 
             # Verify colors primvar still exists but now has cell data characteristics
             self.assertTrue(prim_rt.GetAttribute("primvars:colors").IsValid())
-            np_colors_cell = get_vtrt_array_as_numpy(prim_rt.GetAttribute("primvars:colors"))
+            np_colors_cell = read_rt_array(prim_rt.GetAttribute("primvars:colors"), "cell data colors")
             self.assertIsNotNone(np_colors_cell)
 
             # Colors should match number of faces (cells)

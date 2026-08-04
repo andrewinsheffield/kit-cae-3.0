@@ -50,7 +50,7 @@ class ExecutionContext:
 ```
 
 **Critical Rules:**
-- `timecode` and `next_time_code` are ALWAYS snapped via `get_bracketing_time_codes()`
+- `timecode` and `next_time_code` are ALWAYS snapped via `get_bracketing_time_samples_for_prim()`
 - `raw_timecode` is the original timeline position (not snapped)
 - Operators should use `timecode` for data loading, `next_time_code` for interpolation
 - Never add `is_temporal_mode` - that was removed
@@ -313,9 +313,9 @@ class MyOperator:
 
 ## Critical Invariants (NEVER VIOLATE)
 
-1. **Timecode snapping is centralized**: ALL snapping happens in `_build_execution_context()` via `get_bracketing_time_codes()`
+1. **Timecode snapping is centralized**: ALL snapping happens in `_build_execution_context()` via `get_bracketing_time_samples_for_prim()`
    - Never snap timecodes in operators
-   - Never call `get_bracketing_time_codes()` outside controller
+   - Never call `get_bracketing_time_samples_for_prim()` outside controller
 
 2. **Interpolation control is centralized**: The `next_time_code` is set to `None` in `_build_execution_context()` if `enableFieldInterpolation` is `False`
    - This happens BEFORE any context yielding
@@ -635,9 +635,9 @@ When making changes, always test:
 
 ## Glossary
 
-- **Snapped timecode**: Timecode aligned to actual time sample (via `get_bracketing_time_codes()`)
+- **Snapped timecode**: Timecode aligned to actual time sample (via `get_bracketing_time_samples_for_prim()`)
 - **Raw timecode**: Original timeline position from USD
-- **Bracketing timecodes**: Current and next time samples surrounding raw timecode
+- **Bracketing time samples**: Current and next samples surrounding raw timecode
 - **Temporal state**: Cache tracking which timecodes have been executed since structural change
 - **Structural change**: Any non-temporal change (properties, inputs, API settings)
 - **Temporal update**: First execution at a new timecode (no structural changes)
@@ -661,10 +661,15 @@ def operator(priority: int = 0, supports_temporal: bool = False, tick_on_time_ch
     # Decorator that sets __supports_temporal__ and __tick_on_time_change__ on class
 
 # Utils (python/usd_utils.py)
-def get_bracketing_time_codes(prim: Usd.Prim, timeCode: Usd.TimeCode) -> List[Usd.TimeCode]
-    # Returns [current] or [current, next] based on time samples
+def get_bracketing_time_samples_for_prim(prim: Usd.Prim, time: float) -> tuple[float, float, bool]
+    # Returns lower, upper, and whether time samples exist using the C++ USD utility
 
-# Index Utils (omni.cae.dav/python/index_utils.py)
+def get_bracketing_time_samples_for_data_set_prim(
+    prim: Usd.Prim, time: float, traverse_field_relationships: bool = True
+) -> tuple[float, float, bool]
+    # DataSet-specific C++ wrapper with field-relationship traversal control
+
+# Index Utils (omni.cae.simdata/python/index_utils.py)
 def allocate_attribute_storage(dataset, subset, field_names, start_index=0)
     # Allocates IndeX attribute storage with optional offset
 

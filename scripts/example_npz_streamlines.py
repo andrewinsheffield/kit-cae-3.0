@@ -10,13 +10,12 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.npz import import_to_stage
-from omni.cae.schema import cae
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
-from pxr import Usd
+from pxr import Usd, UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
@@ -24,23 +23,18 @@ from pxr import Usd
 
 
 async def main():
-    # 0. Import the NPZ file as SIDS Unstructured
+    # 0. Import the NPZ file as CGNS
     npz_path = get_test_data_path("disk_out_ref.npz")
-    await import_to_stage(npz_path, "/World/disk_out_ref_npz", schema_type="SIDS Unstructured")
+    await import_to_stage(npz_path, "/World/disk_out_ref_npz", schema="CGNS")
 
     ctx = get_context()
     stage: Usd.Stage = ctx.get_stage()
 
-    # 1. Fix field associations
-    array_base_path = "/World/disk_out_ref_npz/NumPyArrays"
-    array_paths = [f"{array_base_path}/{base}" for base in ["AsH3", "CH4", "GaMe3", "H2", "Pres", "Temp", "V"]]
-    for array_path in array_paths:
-        array_prim = stage.GetPrimAtPath(array_path)
-        field_array_api = cae.FieldArray(array_prim)
-        field_array_api.CreateFieldAssociationAttr().Set(cae.Tokens.vertex)
+    # Create CAE anchor
+    UsdGeom.Xform.Define(stage, "/World/CAE")
 
-    # 2. Generate the streamlines and the seed sphere
-    dataset_path: str = "/World/disk_out_ref_npz/NumPyDataSet"
+    # 1. Generate the streamlines and the seed sphere
+    dataset_path: str = "/World/disk_out_ref_npz/Base/Zone/Section"
     viz_path = "/World/CAE/Streamlines_NumPyDataSet"
     sphere_path: str = "/World/CAE/Sphere"
     sphere_scale = 0.2
@@ -57,6 +51,7 @@ async def main():
     # Set streamlines direction
     streamlines_api: cae_viz.StreamlinesAPI = cae_viz.StreamlinesAPI(viz_prim)
     streamlines_api.GetDirectionAttr().Set(cae_viz.Tokens.forward)
+    streamlines_api.GetMaxStepsAttr().Set(48)
 
     # Set the seed target to the sphere prim
     ds_api: cae_viz.DatasetSelectionAPI = cae_viz.DatasetSelectionAPI(viz_prim, "seeds")
@@ -64,11 +59,11 @@ async def main():
 
     # Set the velocity targets (V is a vector field with 3 components)
     vs_api = cae_viz.FieldSelectionAPI(viz_prim, "velocities")
-    vs_api.GetTargetRel().SetTargets([f"{array_base_path}/V"])
+    vs_api.CreateFieldNamesAttr().Set(["V"])
 
     # Set the color target
     colors_api = cae_viz.FieldSelectionAPI(viz_prim, "colors")
-    colors_api.GetTargetRel().SetTargets([f"{array_base_path}/Temp"])
+    colors_api.CreateFieldNamesAttr().Set(["Temp"])
     await wait_for_update()
 
     # Create a Bounding Box

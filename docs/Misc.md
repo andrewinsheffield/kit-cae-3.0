@@ -43,7 +43,7 @@ repo.bat launch -n omni.cae.kit -- --/foo/bar=12
 
 ```sh
 # Set pip archive directory
-./repo.sh launch -n omni.cae_vtk.kit -- --/exts/omni.kit.pipapi/archiveDirs=[/tmp/pip_archives]
+./repo.sh launch -n omni.cae.kit -- --/exts/omni.kit.pipapi/archiveDirs=[/tmp/pip_archives]
 ```
 
 These command-line settings override default values but are not saved between sessions unless configured in application `.kit` files.
@@ -104,11 +104,14 @@ without constructing the path by hand.
 
 ### Binding in an MDL shader
 
-Pass the URL returned by `get_dynamic_url_for_colormap_path` to any shader input that accepts a texture asset. In Python:
+Pass the URL returned by `get_dynamic_url_for_identifier` to any shader input
+that accepts a texture asset. In Python:
 
 ```python
+identifier = colormap_prim.GetAttribute("cae:viz:colormapTexture:identifier").Get()
+url = get_dynamic_url_for_identifier(identifier)
 shader = UsdShade.Shader(stage.GetPrimAtPath("/World/Foo/Material/Shader"))
-shader.GetInput("lut").Set(Sdf.AssetPath(get_dynamic_url_for_colormap_path(colormap_prim)))
+shader.GetInput("lut").Set(Sdf.AssetPath(url))
 ```
 
 The texture is available as soon as the `Colormap` prim exists on the stage — no explicit refresh call is needed.
@@ -119,7 +122,7 @@ The texture is available as soon as the `Colormap` prim exists on the stage — 
 
 Kit-CAE uses [Warp](https://nvidia.github.io/warp/index.html) quite extensively for implementing most (if not all) of the data transformation operations needed to prepare data for rendering. Warp exposes several package-level options that control how the CUDA / CPU kernels are generated.
 
-Kit-CAE initializes Warp on startup and applies a set of non-persistent settings (under `/exts/omni.cae.data/warp/`) that map directly to `warp.config` attributes. These can be set in a `.kit` file or via command-line arguments (see [Extension Settings](#extension-settings-non-persistent) above).
+Kit-CAE initializes Warp on startup and applies a set of non-persistent settings (under `/exts/omni.cae.core/warp/`) that map directly to `warp.config` attributes. These can be set in a `.kit` file or via command-line arguments (see [Extension Settings](#extension-settings-non-persistent) above).
 
 ### Blackwell GPU workaround
 
@@ -128,14 +131,14 @@ On CUDA compute architectures ≥ 100 (Blackwell and later), the CUDA 12.x toolc
 ```toml
 # Applied automatically on Blackwell — equivalent to:
 [settings]
-exts."omni.cae.data".warp.cudaOutput = "ptx"
-exts."omni.cae.data".warp.ptxTargetArch = 90
+exts."omni.cae.core".warp.cudaOutput = "ptx"
+exts."omni.cae.core".warp.ptxTargetArch = 90
 ```
 
 To opt out of this automatic override (e.g. to test native Blackwell compilation):
 
 ```sh
-./repo.sh launch -n omni.cae.kit -- --/exts/omni.cae.data/warp/skipBlackwellPtxOverride=true
+./repo.sh launch -n omni.cae.kit -- --/exts/omni.cae.core/warp/skipBlackwellPtxOverride=true
 ```
 
 ### Available `warp.config` overrides
@@ -144,30 +147,30 @@ The following settings are supported. Each is optional — if not defined, the c
 
 | Setting path | `warp.config` attribute | Type | Description |
 |---|---|---|---|
-| `/exts/omni.cae.data/warp/mode` | `mode` | string | Warp execution mode (e.g. `"kernel"`) |
-| `/exts/omni.cae.data/warp/verifyFp` | `verify_fp` | bool | Enable floating-point verification |
-| `/exts/omni.cae.data/warp/verifyCuda` | `verify_cuda` | bool | Enable CUDA error verification |
-| `/exts/omni.cae.data/warp/verbose` | `verbose` | bool | Enable verbose Warp output |
-| `/exts/omni.cae.data/warp/verboseWarnings` | `verbose_warnings` | bool | Enable verbose Warp warnings |
-| `/exts/omni.cae.data/warp/ptxTargetArch` | `ptx_target_arch` | int | Target SM architecture for PTX compilation |
-| `/exts/omni.cae.data/warp/maxUnroll` | `max_unroll` | int | Maximum loop unroll factor |
-| `/exts/omni.cae.data/warp/cudaOutput` | `cuda_output` | string | CUDA output format (`"ptx"` or `"cubin"`) |
-| `/exts/omni.cae.data/warp/skipBlackwellPtxOverride` | *(guard)* | bool | Skip the automatic Blackwell PTX workaround |
+| `/exts/omni.cae.core/warp/mode` | `mode` | string | Warp execution mode (e.g. `"kernel"`) |
+| `/exts/omni.cae.core/warp/verifyFp` | `verify_fp` | bool | Enable floating-point verification |
+| `/exts/omni.cae.core/warp/verifyCuda` | `verify_cuda` | bool | Enable CUDA error verification |
+| `/exts/omni.cae.core/warp/verbose` | `verbose` | bool | Enable verbose Warp output |
+| `/exts/omni.cae.core/warp/verboseWarnings` | `verbose_warnings` | bool | Enable verbose Warp warnings |
+| `/exts/omni.cae.core/warp/ptxTargetArch` | `ptx_target_arch` | int | Target SM architecture for PTX compilation |
+| `/exts/omni.cae.core/warp/maxUnroll` | `max_unroll` | int | Maximum loop unroll factor |
+| `/exts/omni.cae.core/warp/cudaOutput` | `cuda_output` | string | CUDA output format (`"ptx"` or `"cubin"`) |
+| `/exts/omni.cae.core/warp/skipBlackwellPtxOverride` | *(guard)* | bool | Skip the automatic Blackwell PTX workaround |
 
 **Example** — enable verbose output and force PTX compilation:
 
 ```sh
 ./repo.sh launch -n omni.cae.kit -- \
-    --/exts/omni.cae.data/warp/verbose=true \
-    --/exts/omni.cae.data/warp/cudaOutput=ptx
+    --/exts/omni.cae.core/warp/verbose=true \
+    --/exts/omni.cae.core/warp/cudaOutput=ptx
 ```
 
 Or in a `.kit` file:
 
 ```toml
 [settings]
-exts."omni.cae.data".warp.verbose = true
-exts."omni.cae.data".warp.cudaOutput = "ptx"
+exts."omni.cae.core".warp.verbose = true
+exts."omni.cae.core".warp.cudaOutput = "ptx"
 ```
 
 ## Precompiling Warp kernels (Experimental)
@@ -197,7 +200,7 @@ Run the `precompile_kernels` repo tool, pointing it at the JSON file produced in
 
 On Windows replace `./repo.sh` with `repo.bat`.
 
-The tool launches Kit internally, loads the DAV extensions, and runs `dav.aot_compile.compile()` against the recorded configuration. The resulting compiled kernels are written to Warp's kernel cache (controlled by `WARP_CACHE_PATH` or `repo.toml`'s `kernel_cache_dir`).
+The tool launches Kit internally, loads the SimData extension, and runs `warp_simdata.aot_compile.compile()` against the recorded configuration. The resulting compiled kernels are written to Warp's kernel cache (controlled by `WARP_CACHE_PATH` or `repo.toml`'s `kernel_cache_dir`).
 
 ### `repo.toml` reference
 

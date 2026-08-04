@@ -1,0 +1,29 @@
+#usda 1.0
+(
+    doc = """Reusable array-expression layer for FLASH arrays at /World/Flash.
+Sublayer this file over a stage containing that scientific-array owner, or copy
+the applied APIs and properties to another scientific-array owner prim."""
+)
+
+over "World"
+{
+    over "Flash" (
+        prepend apiSchemas = [
+            "CaeArrayExpressionAPI:beryllium_density",
+            "CaeArrayExpressionAPI:liner_density"
+        ]
+    )
+    {
+        uniform token cae:array:expression:beryllium_density:computeDevice = "auto"
+        uniform string cae:array:expression:beryllium_density:displayName = "Beryllium Density"
+        uniform bool cae:array:expression:beryllium_density:enabled = true
+        uniform string cae:array:expression:beryllium_density:expression = "dens * bery"
+        uniform int cae:array:expression:beryllium_density:languageVersion = 1
+
+        uniform token cae:array:expression:liner_density:computeDevice = "auto"
+        uniform string cae:array:expression:liner_density:displayName = "Liner Density"
+        uniform bool cae:array:expression:liner_density:enabled = true
+        uniform string cae:array:expression:liner_density:expression = "if(ge(beryllium_density, 1e-4), beryllium_density, 0)"
+        uniform int cae:array:expression:liner_density:languageVersion = 1
+    }
+}

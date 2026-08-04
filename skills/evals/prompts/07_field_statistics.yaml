@@ -17,7 +17,8 @@ prompt: |
   - A 32-bin histogram (bin edges and counts)
 
   Write a Kit-CAE script that imports the file, locates the Pressure field,
-  computes statistics using the Kit-CAE data API, and prints the results as
+  reads the OmniSci array and computes statistics using `omni.cae.core.array_utils`,
+  then prints the results as
   JSON between STATS_BEGIN and STATS_END markers.
 
   Run it headless with --no-window. No visualization or screenshot needed.

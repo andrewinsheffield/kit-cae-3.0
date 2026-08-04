@@ -10,10 +10,10 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
 from pxr import Usd, UsdGeom, UsdVol
 
@@ -29,6 +29,9 @@ async def main():
     ctx = get_context()
     stage: Usd.Stage = ctx.get_stage()
 
+    # Create CAE anchor
+    UsdGeom.Xform.Define(stage, "/World/CAE")
+
     # 1. Generate the support volume for slicing
     dataset_path: str = "/World/StaticMixer/Base/StaticMixer/B1_P3"
     vol_path: str = "/World/CAE/IndeXVolume_B1_P3"
@@ -37,7 +40,7 @@ async def main():
     # 2. Set the field for the volume
     vol_prim: Usd.Prim = stage.GetPrimAtPath(vol_path)
     colors_fs_api = cae_viz.FieldSelectionAPI(vol_prim, "colors")
-    colors_fs_api.CreateTargetRel().SetTargets(["/World/StaticMixer/Base/StaticMixer/Flow_Solution/Eddy_Viscosity"])
+    colors_fs_api.CreateFieldNamesAttr().Set(["Eddy_Viscosity"])
     await wait_for_update()
 
     # 3. Create the slice on X axis

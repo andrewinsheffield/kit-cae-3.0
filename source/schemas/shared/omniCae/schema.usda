@@ -66,6 +66,50 @@ class CaeFieldArray "CaeFieldArray" (
     )
 }
 
+class "CaeArrayExpressionAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "ArrayExpressionAPI"
+        token apiSchemaType = "multipleApply"
+        token propertyNamespacePrefix = "cae:array:expression"
+    }
+    doc = """Experimental multiple-apply API defining a lazily evaluated derived
+             scientific array on a prim. The API instance name is the stable array name."""
+)
+{
+    uniform int languageVersion = 1 (
+        doc = "Expression language version. Version 1 is the currently supported contract."
+        displayName = "Language Version"
+        displayGroup = "Array Expression"
+    )
+
+    uniform bool enabled = true (
+        doc = "Whether this derived array is discoverable and may be evaluated."
+        displayName = "Enabled"
+        displayGroup = "Array Expression"
+    )
+
+    uniform string expression (
+        doc = "A versioned array expression evaluated from native and derived arrays on this prim."
+        displayName = "Expression"
+        displayGroup = "Array Expression"
+    )
+
+    uniform string displayName = "" (
+        doc = "Optional user-facing label for the derived array."
+        displayName = "Display Name"
+        displayGroup = "Array Expression"
+    )
+
+    uniform token computeDevice = "auto" (
+        doc = """Specifies where to evaluate this expression. 'auto' inherits the requesting operator's device.
+                 Results computed on another device are transferred back to the requesting device."""
+        allowedTokens = ["auto", "cpu", "cuda:0", "cuda:1", "cuda:2", "cuda:3"]
+        displayName = "Compute Device"
+        displayGroup = "Array Expression"
+    )
+}
+
 class "CaeNanoVDBFieldArrayAPI" (
     inherits = </APISchemaBase>
 

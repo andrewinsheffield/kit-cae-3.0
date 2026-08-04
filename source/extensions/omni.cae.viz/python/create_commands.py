@@ -13,18 +13,19 @@ This module contains the commands for creating the CAE Viz primitives.
 
 
 import asyncio
+import math
 from logging import getLogger
 
 import numpy as np
-import omni.cae.dav as cae_dav
+import omni.cae.simdata as cae_simdata
 import omni.kit.commands
-from omni.cae.data import progress, usd_utils
+from omni.cae.core import progress, usd_utils
 from omni.cae.schema import cae as cae
 from omni.cae.schema import viz as cae_viz
 from omni.kit.app import get_app
 from omni.kit.property.usd import RelationshipTargetPicker
 from omni.usd import get_context
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdVol, Vt
+from pxr import Gf, OmniSci, Sdf, Usd, UsdGeom, UsdShade, UsdVol, Vt
 
 from . import settings
 
@@ -48,6 +49,40 @@ def setup_mdl_colormap(material: Usd.Prim, colormap_path: str):
         shader.CreateInput("lut", Sdf.ValueTypeNames.Asset).Set(colormap_path)
     else:
         logger.error("No surface shader found for material %s", material.GetPath())
+
+
+def setup_mdl_opacity(material: Usd.Prim | None, prim: Usd.Prim):
+    """Wire an independently selected opacity field into an MDL material."""
+    cae_viz.FieldSelectionAPI.Apply(prim, "opacity")
+    opacity_rescale_api = cae_viz.RescaleRangeAPI.Apply(prim, "opacity")
+    if material is None:
+        return
+
+    shader = get_surface_shader(material, "mdl")
+    if not shader:
+        logger.error("No surface shader found for material %s", material.GetPath())
+        return
+
+    opacity_domain_attr = shader.CreateInput("opacity_domain", Sdf.ValueTypeNames.Float2)
+    if opacity_domain_attr.Get() is None:
+        opacity_domain_attr.Set((0, -1))
+    opacity_rescale_api.CreateIncludesRel().AddTarget(opacity_domain_attr.GetAttr().GetPath())
+
+    opacity_lut_attr = shader.CreateInput("opacity_lut", Sdf.ValueTypeNames.Asset)
+    opacity_lut = opacity_lut_attr.Get()
+    if opacity_lut is None or not opacity_lut.path:
+        opacity_lut_attr.Set("cae/colormaps/gist_gray.png")
+
+    opacity_attr = shader.CreateInput("opacity", Sdf.ValueTypeNames.Float)
+    if opacity_attr.Get() is None:
+        opacity_attr.Set(1.0)
+
+    enable_opacity_attr = shader.CreateInput("enable_opacity", Sdf.ValueTypeNames.Bool)
+    if enable_opacity_attr.Get() is None:
+        enable_opacity_attr.Set(False)
+    opacity_rescale_api.CreateEnableIncludesRel().AddTarget(enable_opacity_attr.GetAttr().GetPath())
+
+    material.CreateAttribute("omni:rtx:enableCutoutOpacity", Sdf.ValueTypeNames.Bool).Set(True)
 
 
 def bind_material(prim: Usd.Prim, material: Usd.Prim):
@@ -87,8 +122,8 @@ class DatasetHelper:
                 raise RuntimeError("DataSet prim is invalid!")
 
             try:
-                if dataset_prim.IsA(cae.DataSet):
-                    dataset = await cae_dav.get_dataset(
+                if dataset_prim.IsA(cae.DataSet) or dataset_prim.IsA(OmniSci.Dataset):
+                    dataset = await cae_simdata.get_dataset(
                         dataset_prim,
                         timeCode=Usd.TimeCode.EarliestTime(),
                         device=device,
@@ -96,15 +131,15 @@ class DatasetHelper:
                         needs_geometry=True,
                     )
                     if use_point_bounds:
-                        with progress.ProgressContext("Executing DAV [compute point bounds]"):
+                        with progress.ProgressContext("Executing SimData [compute point bounds]"):
                             ds_bounds = dataset.get_bounds()
                     else:
-                        with progress.ProgressContext("Executing DAV [compute cell bounds]"):
+                        with progress.ProgressContext("Executing SimData [compute cell bounds]"):
                             ds_bounds = (
-                                dataset.get_cell_bounds() if dataset.get_num_cells() > 0 else dataset.get_bounds()
+                                dataset.get_element_bounds() if dataset.get_num_elems() > 0 else dataset.get_bounds()
                             )
-                    helper.nb_points += dataset.get_num_points()
-                    helper.nb_cells += dataset.get_num_cells()
+                    helper.nb_points += dataset.get_num_nodes()
+                    helper.nb_cells += dataset.get_num_elems()
                     helper.bounds.UnionWith(
                         Gf.Range3d(
                             (ds_bounds[0][0], ds_bounds[0][1], ds_bounds[0][2]),
@@ -271,6 +306,7 @@ class CreateCaeVizStreamlines(omni.kit.commands.Command):
             "ScalarColor", stage, primT.GetPath().AppendChild("Materials").AppendChild("ScalarColor")
         )
         setup_mdl_colormap(scalar_material, "cae/colormaps/gist_rainbow.png")
+        setup_mdl_opacity(scalar_material, prim)
 
         if shader := get_surface_shader(scalar_material, "mdl"):
             attr = shader.CreateInput("domain", Sdf.ValueTypeNames.Float2)
@@ -281,6 +317,7 @@ class CreateCaeVizStreamlines(omni.kit.commands.Command):
             "AnimatedStreaks", stage, primT.GetPath().AppendChild("Materials").AppendChild("AnimatedStreaks")
         )
         setup_mdl_colormap(animated_material, "cae/colormaps/gist_rainbow.png")
+        setup_mdl_opacity(animated_material, prim)
         if shader := get_surface_shader(animated_material, "mdl"):
             attr = shader.CreateInput("domain", Sdf.ValueTypeNames.Float2)
             attr.Set((0, -1))
@@ -352,6 +389,7 @@ class CreateCaeVizPoints(omni.kit.commands.Command):
             "ScalarColor", stage, primT.GetPath().AppendChild("Materials").AppendChild("ScalarColor")
         )
         setup_mdl_colormap(material, "cae/colormaps/gist_rainbow.png")
+        setup_mdl_opacity(material, prim)
 
         # setup colors field selection and rescale range APIs
         cae_viz.FieldSelectionAPI.Apply(prim, "colors")
@@ -433,6 +471,8 @@ class CreateCaeVizFaces(omni.kit.commands.Command):
         cae_viz.FieldSelectionAPI.Apply(prim, "colors")
         cae_viz.RescaleRangeAPI.Apply(prim, "colors")
 
+        setup_mdl_opacity(None if reusing_material else material, prim)
+
         if not reusing_material:
             # setup rescale range API and wire shader inputs only for the owning prim
             if shader := get_surface_shader(material, "mdl"):
@@ -448,6 +488,59 @@ class CreateCaeVizFaces(omni.kit.commands.Command):
         bind_material(primT, material)
 
         # finally, set the enabled state based on settings
+        cae_viz.OperatorAPI(prim).CreateEnabledAttr().Set(settings.get_default_operator_enabled())
+        logger.info("created '%s''", str(primT.GetPath()))
+
+
+class CreateCaeVizIsoSurface(omni.kit.commands.Command):
+    ns: str = "cae:viz"
+
+    def __init__(self, dataset_path: str, prim_path: str):
+        self._dataset_path = dataset_path
+        self._prim_path = prim_path
+
+    async def do(self):
+        logger.info("executing %s.do()", self.__class__.__name__)
+        stage: Usd.Stage = get_context().get_stage()
+
+        primT = UsdGeom.Mesh.Define(stage, self._prim_path)
+        primT.CreatePointsAttr()
+        primT.CreateSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
+
+        helper = await DatasetHelper.init(stage, [self._dataset_path])
+
+        prim = primT.GetPrim()
+        cae_viz.OperatorAPI.Apply(prim)
+        cae_viz.IsoSurfaceAPI.Apply(prim)
+        cae_viz.DatasetSelectionAPI.Apply(prim, "source")
+        dataset_prim = stage.GetPrimAtPath(self._dataset_path)
+        if cae_simdata.supports_dual_representation(dataset_prim):
+            cae_viz.DatasetAxisymmetricRepresentationAPI.Apply(prim, "source")
+            cae_viz.DatasetDualAPI.Apply(prim, "source")
+        if helper.nb_cells > 0:
+            cae_viz.DatasetSubsetAPI.Apply(prim, "source")
+        cae_viz.FieldSelectionAPI.Apply(prim, "contour")
+        cae_viz.FieldSelectionAPI.Apply(prim, "colors")
+
+        cae_viz.DatasetSelectionAPI(prim, "source").CreateTargetRel().SetTargets({self._dataset_path})
+
+        material = create_material(
+            "ScalarColor", stage, primT.GetPath().AppendChild("Materials").AppendChild("ScalarColor")
+        )
+        setup_mdl_colormap(material, "cae/colormaps/gist_rainbow.png")
+        setup_mdl_opacity(material, prim)
+
+        cae_viz.RescaleRangeAPI.Apply(prim, "colors")
+        if shader := get_surface_shader(material, "mdl"):
+            attr = shader.CreateInput("domain", Sdf.ValueTypeNames.Float2)
+            attr.Set((0, -1))
+            cae_viz.RescaleRangeAPI(prim, "colors").CreateIncludesRel().AddTarget(attr.GetAttr().GetPath())
+
+            attr = shader.CreateInput("enable_coloring", Sdf.ValueTypeNames.Bool)
+            attr.Set(False)
+            cae_viz.RescaleRangeAPI(prim, "colors").CreateEnableIncludesRel().AddTarget(attr.GetAttr().GetPath())
+
+        bind_material(primT, material)
         cae_viz.OperatorAPI(prim).CreateEnabledAttr().Set(settings.get_default_operator_enabled())
         logger.info("created '%s''", str(primT.GetPath()))
 
@@ -497,6 +590,7 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
             "ScalarColor", stage, primT.GetPath().AppendChild("Materials").AppendChild("ScalarColor")
         )
         setup_mdl_colormap(material, "cae/colormaps/gist_rainbow.png")
+        setup_mdl_opacity(material, prim)
 
         cae_viz.FieldSelectionAPI.Apply(prim, "colors")
         cae_viz.RescaleRangeAPI.Apply(prim, "colors")
@@ -601,6 +695,9 @@ class CreateCaeVizVolume(omni.kit.commands.Command):
             if helper.nb_cells <= 0:
                 logger.warning("No cells found in dataset. Volume rendering may not be correct.")
             cae_viz.DatasetSubsetAPI.Apply(prim, "source")
+        elif self._type == "axisymmetric":
+            nvindex_type = "vdb"
+            cae_viz.IndeXAxisymmetricVolumeAPI.Apply(prim)
         else:
             nvindex_type = "vdb"
             cae_viz.DatasetVoxelizationAPI.Apply(prim, "source")
@@ -628,6 +725,20 @@ class CreateCaeVizVolume(omni.kit.commands.Command):
         # setup material.
         material: UsdShade.Material = UsdShade.Material.Define(stage, prim.GetPath().AppendChild("Material"))
         colormap = self.define_colormap(stage, material.GetPath().AppendChild("Colormap"))
+        if self._type == "axisymmetric":
+            # FLASH density fields commonly occupy a small fraction of their
+            # full range. The generic midpoint-opacity transfer function makes
+            # a correctly rendered direct-axisymmetric volume appear empty.
+            colormap.GetAttribute("rgbaPoints").Set(
+                Vt.Vec4fArray(
+                    [
+                        Gf.Vec4f(0.0, 0.0, 0.0, 0.0),
+                        Gf.Vec4f(0.1, 0.3, 1.0, 0.8),
+                        Gf.Vec4f(1.0, 0.05, 0.05, 1.0),
+                    ]
+                )
+            )
+            colormap.GetAttribute("xPoints").Set(Vt.FloatArray([0.0, 0.001, 1.0]))
         # colormap.GetReferences().AddInternalReference(cr_colormap.GetPath())
 
         # add field loader compute task.
@@ -642,26 +753,46 @@ class CreateCaeVizVolume(omni.kit.commands.Command):
         # add XAC shader
         shader = UsdShade.Shader.Define(stage, material.GetPath().AppendChild("VolumeShader"))
         # shader.GetPrim().GetReferences().AddInternalReference(cr_shader.GetPath())
-        shader.SetSourceAsset("cae/xac/basic.xac", "xac")
+        shader.SetSourceAsset(
+            "cae/xac/axisymmetric_volume.xac" if self._type == "axisymmetric" else "cae/xac/basic.xac",
+            "xac",
+        )
         shader.CreateInput("colormap", Sdf.ValueTypeNames.Token).ConnectToSource(
             colormap.GetAttribute("outputs:colormap").GetPath()
         )
-        if attr := shader.CreateInput("voxel_size", Sdf.ValueTypeNames.Float3).GetAttr():
-            attr.Set((1, 1, 1))
-            attr.SetCustomDataByKey("nvindex.param", 0)
-            attr.SetDocumentation("Specifies the voxel size for the volume (if applicable).")
-        if attr := shader.CreateInput("mode", Sdf.ValueTypeNames.Int).GetAttr():
-            attr.Set(0)
-            attr.SetCustomDataByKey("nvindex.param", 1)
-            attr.SetDocumentation("Specifies the mode (attribute type). 0 is float, 1 is vector (vec3f).")
-        if attr := shader.CreateInput("attrib_idx", Sdf.ValueTypeNames.Int2).GetAttr():
-            attr.Set(Gf.Vec2i(0, -1))
-            attr.SetCustomDataByKey("nvindex.param", 2)
-            attr.SetDocumentation("Attribute indices: (current, next). Set next to -1 to disable interpolation.")
-        if attr := shader.CreateInput("time_codes", Sdf.ValueTypeNames.Float3).GetAttr():
-            attr.Set((0.0, 0.0, 0.0))
-            attr.SetCustomDataByKey("nvindex.param", 3)
-            attr.SetDocumentation("Time codes: (current, next, raw) for interpolation.")
+        if self._type == "axisymmetric":
+            for name, value, parameter_index in (
+                ("lookup_voxel_sizes_0_3", Gf.Vec4f(0.0), 0),
+                ("lookup_voxel_sizes_4_7", Gf.Vec4f(0.0), 1),
+                ("lookup_level_count", 0, 2),
+                ("lookup_angle_range", Gf.Vec2f(0.0, 2.0 * math.pi), 3),
+            ):
+                if name == "lookup_level_count":
+                    value_type = Sdf.ValueTypeNames.Int
+                elif name == "lookup_angle_range":
+                    value_type = Sdf.ValueTypeNames.Float2
+                else:
+                    value_type = Sdf.ValueTypeNames.Float4
+                attr = shader.CreateInput(name, value_type).GetAttr()
+                attr.Set(value)
+                attr.SetCustomDataByKey("nvindex.param", parameter_index)
+        else:
+            if attr := shader.CreateInput("voxel_size", Sdf.ValueTypeNames.Float3).GetAttr():
+                attr.Set((1, 1, 1))
+                attr.SetCustomDataByKey("nvindex.param", 0)
+                attr.SetDocumentation("Specifies the voxel size for the volume (if applicable).")
+            if attr := shader.CreateInput("mode", Sdf.ValueTypeNames.Int).GetAttr():
+                attr.Set(0)
+                attr.SetCustomDataByKey("nvindex.param", 1)
+                attr.SetDocumentation("Specifies the mode. 0 is float, 1 is vector (vec3f).")
+            if attr := shader.CreateInput("attrib_idx", Sdf.ValueTypeNames.Int2).GetAttr():
+                attr.Set(Gf.Vec2i(0, -1))
+                attr.SetCustomDataByKey("nvindex.param", 2)
+                attr.SetDocumentation("Attribute indices: (current, next). Set next to -1 to disable interpolation.")
+            if attr := shader.CreateInput("time_codes", Sdf.ValueTypeNames.Float3).GetAttr():
+                attr.Set((0.0, 0.0, 0.0))
+                attr.SetCustomDataByKey("nvindex.param", 3)
+                attr.SetDocumentation("Time codes: (current, next, raw) for interpolation.")
 
         material.CreateOutput("nvindex:volume", Sdf.ValueTypeNames.Token).ConnectToSource(
             shader.CreateOutput("volume", Sdf.ValueTypeNames.Token)
@@ -676,20 +807,21 @@ class CreateCaeVizVolume(omni.kit.commands.Command):
         rescale_range_api.CreateIncludesRel().SetTargets([colormap.GetAttribute("domain").GetPath()])
 
         # based on "colors" field, set things up so that we configure the XAC shader automatically.
-        cae_viz.ConfigureXACShaderAPI.Apply(prim, "colors")
-        configure_xac_shader_api = cae_viz.ConfigureXACShaderAPI(prim, "colors")
-        configure_xac_shader_api.CreateVoxelSizeIncludesRel().SetTargets(
-            [shader.GetPrim().GetAttribute("inputs:voxel_size").GetPath()]
-        )
-        configure_xac_shader_api.CreateSampleModeIncludesRel().SetTargets(
-            [shader.GetPrim().GetAttribute("inputs:mode").GetPath()]
-        )
-        configure_xac_shader_api.CreateAttribIdxIncludesRel().SetTargets(
-            [shader.GetPrim().GetAttribute("inputs:attrib_idx").GetPath()]
-        )
-        configure_xac_shader_api.CreateTimeCodesIncludesRel().SetTargets(
-            [shader.GetPrim().GetAttribute("inputs:time_codes").GetPath()]
-        )
+        if self._type != "axisymmetric":
+            cae_viz.ConfigureXACShaderAPI.Apply(prim, "colors")
+            configure_xac_shader_api = cae_viz.ConfigureXACShaderAPI(prim, "colors")
+            configure_xac_shader_api.CreateVoxelSizeIncludesRel().SetTargets(
+                [shader.GetPrim().GetAttribute("inputs:voxel_size").GetPath()]
+            )
+            configure_xac_shader_api.CreateSampleModeIncludesRel().SetTargets(
+                [shader.GetPrim().GetAttribute("inputs:mode").GetPath()]
+            )
+            configure_xac_shader_api.CreateAttribIdxIncludesRel().SetTargets(
+                [shader.GetPrim().GetAttribute("inputs:attrib_idx").GetPath()]
+            )
+            configure_xac_shader_api.CreateTimeCodesIncludesRel().SetTargets(
+                [shader.GetPrim().GetAttribute("inputs:time_codes").GetPath()]
+            )
 
         # finally, set the enabled state based on settings
         cae_viz.OperatorAPI(prim).CreateEnabledAttr().Set(settings.get_default_operator_enabled())
@@ -740,6 +872,19 @@ class CreateCaeVizVolume(omni.kit.commands.Command):
             colormap_prim.GetAttribute("rgbaPoints").Set(rgbaPoints)
             colormap_prim.GetAttribute("xPoints").Set(xPoints)
         return colormap_prim
+
+
+class CreateCaeVizColormap(omni.kit.commands.Command):
+    """Create a texture-ready scientific Colormap prim."""
+
+    def __init__(self, prim_path: str):
+        self._prim_path = prim_path
+
+    def do(self):
+        stage: Usd.Stage = get_context().get_stage()
+        prim = CreateCaeVizVolume.define_colormap(stage, Sdf.Path(self._prim_path))
+        logger.info("created '%s'", self._prim_path)
+        return str(prim.GetPath())
 
 
 class CreateCaeVizVolumeSlice(omni.kit.commands.Command):
@@ -1096,6 +1241,9 @@ class CreateCaeVizPlanarSlice(omni.kit.commands.Command):
         cae_viz.PlanarSliceAPI.Apply(mesh_prim)
         dataset_selection_api = cae_viz.DatasetSelectionAPI.Apply(mesh_prim, "source")
         dataset_selection_api.CreateTargetRel().AddTarget(dataset_prim.GetPath())
+        if cae_simdata.supports_dual_representation(dataset_prim):
+            cae_viz.DatasetAxisymmetricRepresentationAPI.Apply(mesh_prim, "source")
+            cae_viz.DatasetDualAPI.Apply(mesh_prim, "source")
         if self._type == "nanovdb":
             cae_viz.DatasetVoxelizationAPI.Apply(mesh_prim, "source")
         else:
@@ -1108,10 +1256,14 @@ class CreateCaeVizPlanarSlice(omni.kit.commands.Command):
         cae_viz.FieldSelectionAPI.Apply(mesh_prim, "colors")
         rescale_range_api = cae_viz.RescaleRangeAPI.Apply(mesh_prim, "colors")
 
+        # The SimData slice operator produces a triangle mesh with a "colors" primvar.
         material = create_material(
-            "SliceTexture", stage, mesh_prim.GetPath().AppendChild("Materials").AppendChild("SliceTexture")
+            "UnlitScalarColor",
+            stage,
+            mesh_prim.GetPath().AppendChild("Materials").AppendChild("UnlitScalarColor"),
         )
         setup_mdl_colormap(material, "cae/colormaps/gist_rainbow.png")
+        setup_mdl_opacity(material, mesh_prim)
         if shader := get_surface_shader(material, "mdl"):
             attr = shader.CreateInput("domain", Sdf.ValueTypeNames.Float2)
             attr.Set((0, -1))

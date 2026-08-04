@@ -1,82 +1,62 @@
 #!/usr/bin/env python3
-"""Inspect a VTK file and list its fields.
+"""Inspect a VTK asset through the native OpenUSD file-format plugin.
 
-Runs inside Kit-CAE via --exec. Reads the target file path from the
-environment variable ``CAE_INSPECT_FILE``.
-
-Usage (from the kit-cae repo root):
-    CAE_INSPECT_FILE=/path/to/file.vti ./repo.sh launch -n omni.cae_vtk.kit -- \
+Usage from the Kit-CAE repository root:
+    CAE_INSPECT_FILE=/path/to/file.vti ./repo.sh launch -n omni.cae.kit -- \
         --exec skills/cae-core/scripts/inspect_vtk.py --no-window
 """
 
 import asyncio
+import json
 import os
-import sys
 
 import omni.kit.app
-
-# vtk is available inside Kit via pip_prebundle
-import vtk
-
-
-def inspect_vtk(path):
-    ext = os.path.splitext(path)[1].lower()
-    readers = {
-        ".vti": vtk.vtkXMLImageDataReader,
-        ".vtu": vtk.vtkXMLUnstructuredGridReader,
-        ".vts": vtk.vtkXMLStructuredGridReader,
-        ".vtp": vtk.vtkXMLPolyDataReader,
-        ".vtk": vtk.vtkDataSetReader,
-    }
-    if ext not in readers:
-        print(f"ERROR: Unsupported extension: {ext}")
-        return
-
-    reader = readers[ext]()
-    reader.SetFileName(path)
-    reader.Update()
-    data = reader.GetOutput()
-
-    print(f"\nFile:       {path}")
-    print(f"Type:       {data.GetClassName()}")
-    if hasattr(data, "GetNumberOfPoints"):
-        print(f"Points:     {data.GetNumberOfPoints()}")
-    if hasattr(data, "GetNumberOfCells"):
-        print(f"Cells:      {data.GetNumberOfCells()}")
-
-    pd = data.GetPointData()
-    print(f"\nPoint data fields ({pd.GetNumberOfArrays()}):")
-    for i in range(pd.GetNumberOfArrays()):
-        arr = pd.GetArray(i)
-        comps = arr.GetNumberOfComponents()
-        name = arr.GetName() or f"(unnamed-{i})"
-        print(f"  - {name}  (components: {comps}, tuples: {arr.GetNumberOfTuples()})")
-
-    cd = data.GetCellData()
-    print(f"\nCell data fields ({cd.GetNumberOfArrays()}):")
-    for i in range(cd.GetNumberOfArrays()):
-        arr = cd.GetArray(i)
-        comps = arr.GetNumberOfComponents()
-        name = arr.GetName() or f"(unnamed-{i})"
-        print(f"  - {name}  (components: {comps}, tuples: {arr.GetNumberOfTuples()})")
+from omni.cae.core import usd_utils
+from omni.cae.usd_plugins_importers import import_to_stage
+from omni.usd import get_context
+from pxr import OmniSci
 
 
 async def main():
     app = omni.kit.app.get_app()
-
     file_path = os.environ.get("CAE_INSPECT_FILE", "")
-    if not file_path:
-        print("ERROR: Set CAE_INSPECT_FILE=/path/to/file before launching.")
-    elif not os.path.isfile(file_path):
-        print(f"ERROR: File not found: {file_path}")
-    else:
-        inspect_vtk(file_path)
+    if not file_path or not os.path.isfile(file_path):
+        print(f"ERROR: CAE_INSPECT_FILE not set or file not found: {file_path!r}")
+        await _quit(app, 1)
+        return
 
-    print("INSPECT_COMPLETE")
-    app.post_quit()
+    await import_to_stage(file_path, "/World/InspectTarget")
     for _ in range(10):
         await app.next_update_async()
-    os._exit(0)
+
+    print("INSPECT_BEGIN")
+    print(json.dumps(_describe_stage(), indent=2))
+    print("INSPECT_END")
+    await _quit(app, 0)
+
+
+def _describe_stage():
+    stage = get_context().get_stage()
+    result = {"datasets": []}
+    for dataset in (prim for prim in stage.Traverse() if prim.IsA(OmniSci.Dataset)):
+        fields = []
+        for name in usd_utils.get_instances(dataset, "OmniSciFieldAPI"):
+            fields.append(
+                {
+                    "name": name,
+                    "association": dataset.GetAttribute(f"omni:sci:field:{name}:association").Get(),
+                    "type": str(dataset.GetAttribute(f"omni:sci:array:{name}:value").GetTypeName()),
+                }
+            )
+        result["datasets"].append({"path": str(dataset.GetPath()), "fields": fields})
+    return result
+
+
+async def _quit(app, exit_code):
+    app.post_quit(exit_code)
+    for _ in range(10):
+        await app.next_update_async()
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":

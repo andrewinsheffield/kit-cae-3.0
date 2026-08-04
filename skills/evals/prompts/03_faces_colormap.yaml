@@ -3,7 +3,7 @@ description: >
   Tests the agent's ability to import a VTK file, create a faces visualization
   colored by a specific field, and capture a screenshot.
 graded: true
-kit_file: omni.cae_vtk.kit
+kit_file: omni.cae.kit
 data_file: multicomb_0_polyhedra.vtu
 validator: validators/validate_03.py
 

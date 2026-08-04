@@ -1,0 +1,35 @@
+name: independent_opacity
+description: >
+  Human-review routing eval for separate color and opacity field mappings on a
+  surface operator.
+graded: false
+kit_file: omni.cae.kit
+data_file: StaticMixer.cgns
+validator: null
+
+prompt: |
+  Import `data/StaticMixer.cgns` and create a faces visualization. Color it by
+  Temperature and independently map opacity from Pressure. Inspect both field
+  ranges, choose useful domains, and configure a nontrivial opacity LUT and
+  multiplier. Do not encode opacity into the color field or use volume
+  transfer-function alpha.
+
+  Capture a clean screenshot at `{render_dir}/eval_11_opacity.png`. Then disable
+  only opacity mapping, wait for the material/operator update, and capture
+  `{render_dir}/eval_11_opaque.png`.
+
+  Print both domains and RENDER_COMPLETE.
+
+expected_outputs:
+  - type: file
+    path: "{render_dir}/eval_11_opacity.png"
+    min_size_bytes: 10000
+    resolution: [1280, 720]
+  - type: file
+    path: "{render_dir}/eval_11_opaque.png"
+    min_size_bytes: 10000
+    resolution: [1280, 720]
+
+scoring_notes: |
+  Verify separate `colors` and `opacity` selections, a valid opacity domain/LUT,
+  and a visible difference between field-mapped and opaque output.

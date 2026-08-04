@@ -31,8 +31,8 @@ Prim (BasisCurves)
  ├── CaeVizStreamlinesAPI       ← "I specifically compute streamlines"
  ├── DatasetSelectionAPI:source ─→ /Scene/FluidDataset    (the CFD data)
  ├── DatasetSelectionAPI:seeds  ─→ /Scene/SeedPoints       (where to start)
- ├── FieldSelectionAPI:velocities ─→ /Scene/FluidDataset/velocity
- └── FieldSelectionAPI:colors   ─→ /Scene/FluidDataset/pressure
+ ├── FieldSelectionAPI:velocities = ["velocity"]
+ └── FieldSelectionAPI:colors   = ["pressure"]
 ```
 
 The runtime (`omni.cae.viz`) walks the stage, finds every prim that has `CaeVizOperatorAPI`, reads the rest of the recipe, runs the computation, and writes the results back to the prim's geometry attributes (the curves, points, mesh, or volume that USD then renders).
@@ -51,6 +51,7 @@ These tell the runtime *whether* and *how* to run an operator.
 | `CaeVizOperatorDebuggingAPI` | Single-apply | Optional add-on that activates timing logs — useful for profiling. Experimental. |
 | `CaeVizOperatorDependenciesAPI` | Single-apply | Declares that other operators depend on this one, so the scheduler can order execution. Experimental. |
 | `CaeVizOperatorTemporalAPI` | Single-apply | Controls time-aware execution: pin the operator to a fixed time (`useLockedTime`), or enable sub-sample **field interpolation** for smooth animation playback. |
+| `CaeVizColormapTextureAPI` | Single-apply | Authors a one-dimensional colormap texture from a named colormap and optional reversal setting. |
 
 ### 2. Dataset input schemas
 
@@ -58,10 +59,14 @@ These select and pre-process the CAE datasets that feed into an operator.
 
 | Schema | Type | Purpose |
 |--------|------|---------|
-| `CaeVizDatasetSelectionAPI` | Multiple-apply | Picks a `CaeDataSet` prim as input. The instance name is the role (`source`, `seeds`, …). |
+| `CaeVizDatasetSelectionAPI` | Multiple-apply | Picks a scientific dataset prim as input, normally an `OmniSciDataset`. The instance name is the role (`source`, `seeds`, …). |
+| `CaeVizDatasetAxisymmetricRepresentationAPI` | Multiple-apply | Configures an axisymmetric representation for the matching selected dataset. `angularCells` spans the authored `minimumAngle` to `maximumAngle` range in degrees. FLASH AMR is the initial supported model. |
+| `CaeVizDatasetDualAPI` | Multiple-apply | Requests the dual representation of the dataset selected by the matching instance. This experimental marker has no properties; support is resolved by Kit, with FLASH AMR as the initial supported model. |
 | `CaeVizDatasetTransformingAPI` | Multiple-apply | Controls whether the dataset's world-space transform is applied before processing. |
 | `CaeVizDatasetVoxelizationAPI` | Multiple-apply | Converts an unstructured (e.g., FEM/CFD) dataset into a regular **NanoVDB** voxel grid. You choose the grid resolution either by maximum voxel count (`maxResolution`) or an explicit voxel size. |
+| `CaeVizDatasetSubsetAPI` | Multiple-apply | Selects a point or cell subset using index ranges, field thresholds, or spatial bounds before the visualization algorithm runs. |
 | `CaeVizDatasetGaussianSplattingAPI` | Multiple-apply | Before voxelization, splats point/cell data using Gaussian kernels. Useful for sparse data like particle clouds. |
+| `CaeVizDatasetVoronoiPointCloudAPI` | Multiple-apply | Treats point data as an implicit Voronoi point cloud, with one logical cell per source point. This can be probed directly or used before voxelization. |
 | `CaeVizDatasetTemporalTraitsAPI` | Multiple-apply | Annotates a dataset with knowledge about its temporal behaviour (`static` / `varying` / `undefined` for both topology and geometry). The runtime uses this to skip unnecessary recomputation between frames. |
 
 ### 3. Field selection and processing schemas
@@ -70,7 +75,7 @@ CAE datasets contain many **fields** (pressure, velocity, temperature, …). The
 
 | Schema | Type | Purpose |
 |--------|------|---------|
-| `CaeVizFieldSelectionAPI` | Multiple-apply | Points at one or more field prims in the dataset. The instance name is the role (`velocities`, `colors`, `widths`, …). The `mode` attribute controls whether to pass values unchanged, compute the **vector magnitude**, or extract a single **component**. |
+| `CaeVizFieldSelectionAPI` | Multiple-apply | Selects one or more fields by their `OmniSciFieldAPI` instance names. The instance name is the role (`velocities`, `colors`, `widths`, …). The `mode` attribute controls whether to pass values unchanged, compute the **vector magnitude**, or extract a single **component**. The older `target` relationship remains only for legacy stages. |
 | `CaeVizFieldMappingAPI` | Multiple-apply | Remaps the field's numeric range to a desired output range. If the domain is left invalid, it is auto-computed from the data minimum/maximum. |
 | `CaeVizFieldThresholdingAPI` | Multiple-apply | Masks out values outside a specified range, filling them with a configurable background value. Useful for isolating regions of interest. |
 
@@ -81,10 +86,13 @@ Each of these corresponds to a specific visualization technique. They are applie
 | Schema | Applied to | What it produces |
 |--------|-----------|-----------------|
 | `CaeVizFacesAPI` | `UsdGeomMesh` | Extracts the **surface faces** of a volumetric dataset (e.g., the outer skin of a CFD mesh, or all internal faces). |
+| `CaeVizIsoSurfaceAPI` | `UsdGeomMesh` | Extracts a triangular **iso-surface** at `isoValue` from the scalar field selected by `FieldSelectionAPI:contour`. Cell fields are averaged onto points before extraction. |
 | `CaeVizStreamlinesAPI` | `UsdGeomBasisCurves` | Traces **streamlines** (or pathlines) through a velocity field seeded from a seed dataset. Exposes integration parameters: step sizes, direction, velocity threshold, tolerance. |
 | `CaeVizPointsAPI` | `UsdGeomPoints` | Renders the **point cloud** of a dataset, optionally limited to points actually used by cells. |
 | `CaeVizGlyphsAPI` | `UsdGeomPointInstancer` | Places oriented **glyphs** (arrows, spheres, …) at each point. Orientation can be expressed as Euler angles or quaternions. |
 | `CaeVizIndeXVolumeAPI` | `UsdVolVolume` | Marks the volume for rendering with **NVIDIA IndeX** — a high-quality in-situ volume renderer. |
+| `CaeVizIndeXAxisymmetricVolumeAPI` | `UsdVolVolume` | Selects experimental direct FLASH axisymmetric rendering. Native 2D AMR levels are sampled by an NVIDIA IndeX shader without revolved geometry or finest-level 3D resampling. |
+| `CaeVizPlanarSliceAPI` | `UsdGeomMesh` | Extracts colored triangular cross-sections from the selected volume. Its `mode` property, displayed as **Direction**, supports a free transform-oriented plane, axis-aligned planes, and two- or three-plane combinations. |
 
 ### 5. Automation / wiring schemas
 
@@ -120,7 +128,7 @@ def Mesh "SurfaceMesh" (
     rel cae:viz:dataset_selection:source:target = </Scene/FluidMesh>
 
     # Which field to use as the face colour
-    rel cae:viz:field_selection:colors:target = </Scene/FluidMesh/pressure>
+    token[] cae:viz:field_selection:colors:fieldNames = ["pressure"]
 
     # Extract only the outer skin of the mesh
     uniform bool cae:viz:faces:externalOnly = true
@@ -128,6 +136,88 @@ def Mesh "SurfaceMesh" (
 ```
 
 At runtime the `omni.cae.viz` extension finds this prim, reads the relationships and attributes, runs the face-extraction algorithm on `FluidMesh`, and fills the mesh geometry (points, face counts, indices) with the result. The `pressure` field values are written as a `primvar:colors` attribute, which the renderer picks up for shading.
+
+## End-to-end example: iso-surface extraction
+
+```usda
+def Mesh "PressureIsoSurface" (
+    prepend apiSchemas = [
+        "CaeVizOperatorAPI",
+        "CaeVizIsoSurfaceAPI",
+        "CaeVizDatasetSelectionAPI:source",
+        "CaeVizFieldSelectionAPI:contour",
+        "CaeVizFieldSelectionAPI:colors",
+    ]
+)
+{
+    bool cae:viz:operator:enabled = true
+    rel cae:viz:dataset_selection:source:target = </Scene/FluidVolume>
+    token[] cae:viz:field_selection:contour:fieldNames = ["pressure"]
+    token[] cae:viz:field_selection:colors:fieldNames = ["temperature"]
+    uniform float cae:viz:isoSurface:isoValue = 101325.0
+}
+```
+
+Both point- and cell-associated scalar contour fields are accepted. Cell values
+are reconstructed at points by averaging the incident cells. Selected output
+fields such as `colors` use the same conversion when necessary and are then
+interpolated onto the generated surface points. For a supported input,
+`CaeVizDatasetAxisymmetricRepresentationAPI:source` may set the angular-cell
+count and degree-based revolution range. FLASH inputs use the concrete Kit
+defaults of 32 cells and 0–360 degrees when the schema is absent.
+`CaeVizDatasetDualAPI:source` may be added to request a dual topology for the
+matching selected dataset; iso-surface creation authors it automatically for
+models Kit identifies as dual-capable. For those models, iso-surface creation
+also authors the axisymmetric controls. Generated surfaces are cached per device
+and timecode for temporal reuse, and are recomputed after structural changes.
+They are hidden when extraction produces no points or elements.
+
+---
+
+## End-to-end example: direct FLASH axisymmetric volume
+
+`CreateCaeVizVolume(type="axisymmetric")` authors the importer, material, and
+renderer properties as well as the following core API contract. The supporting
+IndeX child prims are omitted here for clarity:
+
+```usda
+def Volume "DensityVolume" (
+    prepend apiSchemas = [
+        "CaeVizOperatorAPI",
+        "CaeVizIndeXVolumeAPI",
+        "CaeVizIndeXAxisymmetricVolumeAPI",
+        "CaeVizDatasetSelectionAPI:source",
+        "CaeVizFieldSelectionAPI:colors",
+    ]
+)
+{
+    bool cae:viz:operator:enabled = true
+    rel cae:viz:dataset_selection:source:target = </Scene/FlashDataset>
+    token[] cae:viz:field_selection:colors:fieldNames = ["dens"]
+    uniform float cae:viz:indexAxisymmetricVolume:samplingDistanceScale = 32.0
+}
+```
+
+`samplingDistanceScale` multiplies the finest native FLASH cell spacing to
+produce the IndeX ray step. It changes sampling cost and quality, not the stored
+resolution. The renderer stores a small constant domain grid as attribute zero
+and sparse native AMR levels as attributes one onward, ordered finest to
+coarsest. The shader converts each object-space 3D ray sample to
+`(radius, axial)`, returns the first finite native-level value, and discards
+samples outside all leaves.
+Coarse blocks remain coarse: this path performs no prolongation, angular field
+replication, unstructured-grid conversion, or dense 3D resampling.
+
+The current contract accepts a FLASH scalar `colors` field with square
+radial/axial cells, integral refinement ratios, and at most eight levels.
+Dataset subsetting and voxelization must not be applied to the `source`
+selection. Direct rendering uses the axisymmetric representation's minimum and
+maximum angles to clip the revolution about the volume's local Y axis. Angular
+cells are not materialized or consulted because the direct shader evaluates the
+analytical axisymmetric field without angular tessellation. See the visualization extension's
+[technical overview](../source/extensions/omni.cae.viz/docs/Overview.md#direct-axisymmetric-volume-design)
+for the attribute layout, memory behavior, device transfer, and update
+lifecycle.
 
 ---
 
@@ -159,10 +249,10 @@ def BasisCurves "Streamlines" (
     int   cae:viz:dataset_voxelization:source:maxResolution = 256
 
     # Use the velocity field for integration
-    rel cae:viz:field_selection:velocities:target = </Scene/FluidVolume/velocity>
+    token[] cae:viz:field_selection:velocities:fieldNames = ["velocity"]
 
     # Colour by pressure, mapped to [0, 1]
-    rel cae:viz:field_selection:colors:target = </Scene/FluidVolume/pressure>
+    token[] cae:viz:field_selection:colors:fieldNames = ["pressure"]
     float2 cae:viz:field_mapping:colors:domain = (0.0, 100000.0)   # Pa
     float2 cae:viz:field_mapping:colors:range  = (0.0, 1.0)
 
@@ -185,8 +275,12 @@ CaeVizOperatorAPI              ← required on every operator prim
  ├── CaeVizOperatorDebuggingAPI        (optional: profiling)
  │
  ├── CaeVizDatasetSelectionAPI:*       (1+ dataset inputs)
+ │    ├── CaeVizDatasetAxisymmetricRepresentationAPI:* (optional: configure axisymmetric conversion)
+ │    ├── CaeVizDatasetDualAPI:*           (optional: request dual representation)
  │    ├── CaeVizDatasetVoxelizationAPI:*   (optional: convert to voxel grid)
+ │    ├── CaeVizDatasetSubsetAPI:*         (optional: select a subset)
  │    ├── CaeVizDatasetGaussianSplattingAPI:*  (optional: Gaussian splat first)
+ │    ├── CaeVizDatasetVoronoiPointCloudAPI:*  (optional: Voronoi point-cloud first)
  │    ├── CaeVizDatasetTransformingAPI:*   (optional: apply world transform)
  │    └── CaeVizDatasetTemporalTraitsAPI:* (optional: hint about time behaviour)
  │
@@ -196,7 +290,8 @@ CaeVizOperatorAPI              ← required on every operator prim
  │
  ├── One algorithm schema:
  │    CaeVizFacesAPI | CaeVizStreamlinesAPI | CaeVizPointsAPI
- │    CaeVizGlyphsAPI | CaeVizIndeXVolumeAPI
+ │    CaeVizGlyphsAPI | CaeVizIndeXVolumeAPI | CaeVizPlanarSliceAPI
+ │      └── CaeVizIndeXAxisymmetricVolumeAPI (optional direct FLASH path)
  │
  └── Automation schemas (optional):
       CaeVizRescaleRangeAPI
@@ -214,8 +309,8 @@ API schemas compose cleanly. A single prim can simultaneously be a USD `BasisCur
 **Why multiple-apply for datasets and fields?**
 An operator often needs more than one input. Streamlines need a source volume *and* a seed dataset. The instance name (`source`, `seeds`) acts as a named port, making the intent explicit and letting the operator code look up each input by its role.
 
-**Why relationships instead of string paths?**
-USD relationships (`rel`) are first-class references that the stage tracks. They survive renames, composition arcs, and referencing. A plain string attribute containing a path would break whenever a prim moves.
+**Why relationships for datasets but names for fields?**
+Dataset and region-of-interest inputs are prims, so USD relationships give them composition-aware references. OmniSci fields are multiple-applied API instances on the selected dataset rather than child prims. `fieldNames` therefore binds fields by their stable API instance names without inventing paths that do not exist.
 
 **Why write results back to the prim's geometry?**
 The output is regular USD geometry (`BasisCurves`, `Mesh`, `Points`, `Volume`). Any USD-aware renderer — NVIDIA Omniverse RTX, Hydra, offline renderers — can display it without knowing anything about Kit-CAE. The schemas are purely an *authoring* convention; at render time the prim looks like ordinary geometry.

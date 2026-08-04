@@ -1,0 +1,36 @@
+name: iso_surface
+description: >
+  Human-review routing eval for schema-authored iso-surface extraction and
+  independent output coloring.
+graded: false
+kit_file: omni.cae.kit
+data_file: StaticMixer.cgns
+validator: null
+
+prompt: |
+  Import `data/StaticMixer.cgns` into Kit-CAE and inspect its datasets and field
+  ranges. Create a triangular iso-surface of Temperature at a meaningful value
+  inside the actual range, and color the generated surface by Pressure.
+
+  Use `CreateCaeVizIsoSurface`, bind the scalar contour through the `contour`
+  field-selection instance, and bind Pressure through `colors`. Create a
+  bounding box, frame the result, wait for operator completion, and capture a
+  clean 1280x720 screenshot at `{render_dir}/eval_09_iso_surface.png`.
+
+  Print the selected dataset path, Temperature range, iso-value, and
+  RENDER_COMPLETE.
+
+expected_outputs:
+  - type: file
+    path: "{render_dir}/eval_09_iso_surface.png"
+    min_size_bytes: 10000
+    resolution: [1280, 720]
+  - type: stage
+    prims:
+      - path_contains: IsoSurface
+      - path_contains: BoundingBox
+
+scoring_notes: |
+  Verify that the agent chose an in-range iso-value, used `contour` separately
+  from `colors`, waited for the operator, and visually inspected non-empty
+  extracted geometry.

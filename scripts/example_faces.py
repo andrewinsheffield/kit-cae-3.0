@@ -10,11 +10,12 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
+from pxr import UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
@@ -31,6 +32,9 @@ async def main():
     # Base path for the imported dataset
     base_path = "/World/StaticMixer/Base/StaticMixer"
 
+    # create CAE anchor
+    UsdGeom.Xform.Define(ctx.get_stage(), "/World/CAE")
+
     # 1. Generate the faces for StaticMixer_Default
     dataset_path: str = f"{base_path}/StaticMixer_Default"
     viz_path: str = "/World/CAE/ExternalFaces_StaticMixer_Default"
@@ -40,10 +44,8 @@ async def main():
     # 2. Add color by Temperature field
     stage = ctx.get_stage()
     viz_prim = stage.GetPrimAtPath(viz_path)
-    temp_field_path = f"{base_path}/Flow_Solution/Temperature"
-
     colors_fs_api = cae_viz.FieldSelectionAPI(viz_prim, "colors")
-    colors_fs_api.CreateTargetRel().SetTargets([temp_field_path])
+    colors_fs_api.CreateFieldNamesAttr().Set(["Temperature"])
     await wait_for_update()
 
     # 3. Select and frame the mesh

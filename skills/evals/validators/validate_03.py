@@ -3,21 +3,26 @@ Eval 03 Validator: Faces + Colormap
 Runs inside Kit-CAE via --exec. Imports VTU file, creates faces visualization with colormap,
 verifies field binding, and checks screenshot.
 """
+
 import asyncio
 import json
 import os
 
+import numpy as np
 import omni.kit.app
 import omni.usd
-from omni.cae.data.commands import execute_command
-from omni.cae.schema import cae, viz as cae_viz
+from omni.cae.core import array_utils, usd_utils
+from omni.cae.core.commands import execute_command
+from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, wait_for_update
-from omni.kit.viewport.utility import get_active_viewport, capture_viewport_to_file
+from omni.cae.usd_plugins_importers import import_to_stage
+from omni.kit.viewport.utility import capture_viewport_to_file, get_active_viewport
 from omni.usd import get_context
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade
+from pxr import Gf, OmniSci, Usd, UsdGeom, UsdShade
 
 RENDER_DIR = os.environ.get("KIT_CAE_EVAL_RENDER_DIR") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data", "renders")
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data", "renders"
+)
 os.makedirs(RENDER_DIR, exist_ok=True)
 OUTPUT_PATH = os.path.join(RENDER_DIR, "eval_03_faces.png")
 
@@ -28,7 +33,6 @@ async def main():
 
     # 1. Import
     try:
-        from omni.cae.importer.vtk import import_to_stage
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data")
         await import_to_stage(os.path.join(data_dir, "multicomb_0_polyhedra.vtu"), "/World/multicomb")
         await wait_for_update(20)
@@ -41,27 +45,21 @@ async def main():
 
     stage = get_context().get_stage()
 
-    # 2. Discover dataset and field paths
-    import usdrt
-    fabric_stage = usdrt.Usd.Stage.Attach(omni.usd.get_context().get_stage_id())
+    # 2. Discover an OmniSci dataset carrying the Density field.
+    datasets = [prim for prim in stage.Traverse() if prim.IsA(OmniSci.Dataset)]
+    density_datasets = [prim for prim in datasets if "Density" in usd_utils.get_instances(prim, "OmniSciFieldAPI")]
+    has_density = bool(density_datasets)
+    checks.append(
+        {
+            "name": "density_field_found",
+            "pass": has_density,
+            "detail": str(density_datasets[0].GetPath()) if has_density else "No Density field",
+        }
+    )
 
-    dataset_type = Tf.Type.Find(cae.DataSet)
-    datasets = [p.GetString() for p in fabric_stage.GetPrimsWithTypeName(dataset_type.typeName)]
-    mesh_datasets = [d for d in datasets if "GridCoordinates" not in d]
+    dataset_path = str(density_datasets[0].GetPath()) if density_datasets else None
 
-    field_type = Tf.Type.Find(cae.FieldArray)
-    all_fields = [p.GetString() for p in fabric_stage.GetPrimsWithTypeName(field_type.typeName)]
-
-    # Find Density field
-    density_fields = [f for f in all_fields if "Density" in f]
-    has_density = len(density_fields) > 0
-    checks.append({"name": "density_field_found", "pass": has_density,
-                    "detail": density_fields[0] if has_density else "No Density field"})
-
-    dataset_path = mesh_datasets[0] if mesh_datasets else None
-    field_path = density_fields[0] if density_fields else None
-
-    if not dataset_path or not field_path:
+    if not dataset_path:
         checks.append({"name": "faces_created", "pass": False, "detail": "No dataset or field"})
         _emit_result("03_faces_colormap", checks)
         _shutdown(app)
@@ -83,7 +81,7 @@ async def main():
         # Bind field — this triggers the controller update cycle which will
         # auto-rescale domain and set enable_coloring=True via RescaleRangeAPI
         faces_prim = stage.GetPrimAtPath(faces_path)
-        cae_viz.FieldSelectionAPI(faces_prim, "colors").CreateTargetRel().SetTargets([field_path])
+        cae_viz.FieldSelectionAPI(faces_prim, "colors").CreateFieldNamesAttr().Set(["Density"])
 
         # Wait for the faces controller to run process_rescale_range_apis
         # The controller needs multiple update cycles to: detect field change → compute faces → rescale
@@ -103,9 +101,10 @@ async def main():
                 domain_val = domain_input.Get()
                 if domain_val and domain_val[1] < domain_val[0]:
                     # Controller hasn't rescaled yet — manually compute and set range
-                    from omni.cae.data import array_utils, usd_utils
-                    field_prim = stage.GetPrimAtPath(field_path)
-                    farray = await usd_utils.get_array(field_prim, Usd.TimeCode.EarliestTime())
+                    dataset_prim = stage.GetPrimAtPath(dataset_path)
+                    attr = dataset_prim.GetAttribute("omni:sci:array:Density:value")
+                    value = await asyncio.to_thread(attr.Get, Usd.TimeCode.EarliestTime())
+                    farray = np.asarray(value)
                     ranges = array_utils.get_componentwise_ranges(farray)
                     if ranges:
                         fmin, fmax = float(ranges[0][0]), float(ranges[0][1])
@@ -126,17 +125,21 @@ async def main():
     # 5. Verify field binding
     if prim_exists:
         colors_api = cae_viz.FieldSelectionAPI(faces_prim, "colors")
-        targets = colors_api.GetTargetRel().GetTargets()
-        field_bound = len(targets) > 0 and "Density" in str(targets[0])
-        checks.append({"name": "field_bound", "pass": field_bound,
-                        "detail": str(targets[0]) if targets else "No targets"})
+        field_names = colors_api.GetFieldNamesAttr().Get() or []
+        field_bound = "Density" in field_names
+        checks.append(
+            {
+                "name": "field_bound",
+                "pass": field_bound,
+                "detail": str(field_names) if field_names else "No field names",
+            }
+        )
     else:
         checks.append({"name": "field_bound", "pass": False, "detail": "No faces prim"})
 
     # 6. Verify bounding box
     bbox_prim = stage.GetPrimAtPath(bbox_path)
-    checks.append({"name": "bbox_exists", "pass": bool(bbox_prim and bbox_prim.IsValid()),
-                    "detail": bbox_path})
+    checks.append({"name": "bbox_exists", "pass": bool(bbox_prim and bbox_prim.IsValid()), "detail": bbox_path})
 
     # 7. Capture screenshot
     try:
@@ -152,8 +155,13 @@ async def main():
 
         file_exists = os.path.isfile(OUTPUT_PATH)
         file_size = os.path.getsize(OUTPUT_PATH) if file_exists else 0
-        checks.append({"name": "screenshot_exists", "pass": file_exists and file_size > 10000,
-                        "detail": f"{OUTPUT_PATH} ({file_size} bytes)"})
+        checks.append(
+            {
+                "name": "screenshot_exists",
+                "pass": file_exists and file_size > 10000,
+                "detail": f"{OUTPUT_PATH} ({file_size} bytes)",
+            }
+        )
     except Exception as e:
         checks.append({"name": "screenshot_exists", "pass": False, "detail": str(e)})
 
@@ -179,6 +187,7 @@ def _shutdown(app):
         for _ in range(10):
             await app.next_update_async()
         os._exit(0)
+
     asyncio.ensure_future(_do_shutdown())
 
 

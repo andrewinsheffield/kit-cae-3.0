@@ -2,34 +2,148 @@
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [2.1.3]
+## [3.0.0]
 
 ### Changed
 
-- **Kit SDK 110.1.3 support**: Added Kit SDK 110.1.3 to `select_kit_version` and promoted it to the
-  default Kit version, with refreshed app, streaming, and Kit-CAE templates.
+- **Warp SimData runtime** (`omni.cae.simdata` 1.9.0): Updated the runtime to
+  Warp SimData 0.1.0.
+- **CAE OpenUSD plugins** (`omni.cae.usd_plugins` 1.4.0): Updated the runtime
+  to CAE OpenUSD Plugins 0.1.1.
+- **Resolver-backed CAE datasets** (`omni.cae.usd_plugins` 1.3.0): Updated the
+  CAE OpenUSD plugin runtime to load self-contained and explicitly linked
+  datasets through app-provided OpenUSD asset resolvers. Dataset layouts that
+  require directory scanning now report unsupported non-filesystem assets.
+- **Kit SDK 110.1.3**: Added Kit 110.1.3 support and made it the default SDK.
+- **Kit SDK 109.0 series**: Added support for Kit 109.0.5, 109.0.6, and 109.0.7.
+- **Geometry-based planar slicing** (`omni.cae.schema` 2.5.0,
+  `omni.cae.simdata` 1.7.0, `omni.cae.viz` 2.6.0): Replaced texture probing with
+  Warp SimData triangle extraction, including batched multi-plane directions,
+  flicker-free RT output buffering, and two-sided unlit scalar coloring. SimData
+  extraction warnings now retain warning severity in the Kit log.
+- **Axisymmetric FLASH representation** (`omni.cae.schema` 2.4.0,
+  `omni.cae.simdata` 1.6.0): Reduced the default full-revolution representation from 256 to 32
+  angular cells. Operators can still author a different angular-cell count per input.
 
-## [2.1.2]
+### Added
+
+- **Field-driven opacity mapping** (`omni.cae.viz` 2.6.0,
+  `omni.cae.context_menu` 3.4.0): Faces, Points, Glyphs, Iso Surfaces,
+  Streamlines, and Planar Slices can map opacity from an independent scalar
+  field through a dedicated lookup texture and multiplier. Texture-enabled
+  Colormaps publish separate color and alpha-derived opacity textures, with
+  context-menu actions for creating Colormaps and copying either texture URL.
+- **Experimental direct axisymmetric volume rendering**: Added
+  `CaeVizIndeXAxisymmetricVolumeAPI` and a dedicated axisymmetric operator for
+  FLASH AMR volumes. NVIDIA IndeX samples sparse native-resolution
+  `(radius, axial)` refinement attributes from one self-contained NanoVDB. A
+  coarse first attribute establishes the revolved sampling domain without
+  angular replication. The authored angle range controls clipping, and
+  previously visited time steps are cached.
+- **Experimental array expressions** (`omni.cae.schema` 2.4.0, `omni.cae.simdata` 1.6.0,
+  `omni.cae.context_menu` 3.4.0, `omni.cae.property.bundle` 2.4.0): Added versioned,
+  lazy scalar and vector derived arrays that participate in discovery, Array Details, and
+  visualization operators like native arrays. The Property panel provides completion,
+  diagnostics, dependency status, and device selection in the standard schema property group;
+  compact graph results are cached by authored state, time, and device independently of
+  visualization representation. `zeros_like`, `ones_like`, and `full_like` create constants
+  matching a reference field's tuple and component layout.
+- **Authored axisymmetric dataset representations** (`omni.cae.schema` 2.4.0,
+  `omni.cae.simdata` 1.6.0, `omni.cae.viz` 2.5.0, `omni.cae.context_menu` 3.4.0,
+  `omni.cae.property.bundle` 2.4.0): Added per-input angular-cell and angle-range controls for
+  axisymmetric FLASH AMR conversion. Native and dual requests resolve through one concrete
+  representation, allowing equivalent operators to share the lower converted-dataset cache while
+  retaining independent visualization pipelines.
+- **Experimental dual dataset representations** (`omni.cae.schema` 2.3.0,
+  `omni.cae.simdata` 1.5.0, `omni.cae.viz` 2.4.0, `omni.cae.context_menu` 3.3.0,
+  `omni.cae.property.bundle` 2.3.0): Added authored `CaeVizDatasetDualAPI` selection, centralized
+  dual-capability resolution, and representation-aware dataset and field loading. Iso-surface
+  creation applies the dual request automatically for supported datasets; FLASH AMR is the initial
+  supported model. Generated iso-surfaces are cached per timecode and input state.
+- **Iso-surface visualization** (`omni.cae.schema` 2.2.0, `omni.cae.viz` 2.3.0,
+  `omni.cae.context_menu` 3.2.0): Added schema-authored triangular iso-surfaces for scalar point or
+  cell fields. Cell values are averaged onto points and cached in the shared dataset-input pipeline;
+  optional output fields are reconstructed and interpolated for surface coloring.
+- **Axisymmetric FLASH AMR support** (`omni.cae.usd_plugins` 1.2.0,
+  `omni.cae.usd_plugins_importers` 1.2.0, `omni.cae.simdata` 1.4.0): Added native `.flash`
+  descriptor loading and importing plus SimData dataset and field conversion. Kit uses
+  a full-revolution representation with 256 angular cells, source dimension 0 as radius, and source
+  dimension 1 as the cylinder axis.
+- **Unlit scalar-color material** (`omni.cae.viz` 2.3.0): New `UnlitScalarColor` MDL material maps
+  the `colors` scalar primvar through an optional LUT and emits the result independently of scene
+  lighting.
+- **CAE USD plugins as the primary data path** (`omni.cae.usd_plugins` 1.0.0,
+  `omni.cae.usd_plugins_importers` 1.1.0): Added CAE USD file-format support
+  for CGNS, EDEM, EnSight, NPZ, NanoVDB, OpenFOAM, Trimesh, VTK, and ColorMap.
+  Importers provide per-format entry points and a unified
+  `import_to_stage(path, prim_path)` API.
+- **Eclipse reservoir formats** (`omni.cae.usd_plugins` 1.0.0, `omni.cae.usd_plugins_importers` 1.1.0,
+  `omni.cae.schema` 2.1.0): New INIT and UNRST USD file-format plugins, an `OmniSciReservoirDataset`
+  schema, and matching importers / context-menu support for visualizing reservoir simulation results.
+- **OmniSci-backed datasets across the viz stack** (`omni.cae.viz` 2.1.0, `omni.cae.simdata` 1.3.0,
+  `omni.cae.context_menu` 3.1.0, `omni.cae.widget.stage_icons` 1.2.0): Time and change-tracking
+  machinery follows `OmniSciDataset` prims, the SimData command stack gained dedicated
+  `OmniSciDatasetConvertToSimDataSet` / `GetAvailableFields` commands, context menus accept
+  OmniSci datasets, and the Stage panel ships a dedicated icon.
+- **Operator Pipeline editor & polished field-name controls** (`omni.cae.property.bundle` 2.1.0):
+  New Property panel widgets surface the upstream operator graph for a selected CAE prim and
+  provide a dedicated multi-select Field Names editor with summary text.
+- **Operator execution progress** (`omni.cae.viz` 2.1.0, `omni.cae.simdata` 1.3.0): Long-running
+  operators now publish progress to the Kit status line via the shared progress service.
+- **Voronoi point-cloud dataset model for viz operators** (`omni.cae.schema` 2.2.0,
+  `omni.cae.viz` 2.2.0, `omni.cae.context_menu` 3.2.0): New
+  `CaeVizDatasetVoronoiPointCloudAPI` converts selected datasets into SimData Voronoi point-cloud
+  datasets, treats each source point as a Voronoi seed with one logical cell, and exposes the API
+  through **Add API > CAE > Dataset Voronoi Point Cloud**.
+- **Core utility API** (`omni.cae.core` 1.0.0): CAE utility modules are now
+  published through `omni.cae.core`. The legacy Data Delegate and `IFieldArray`
+  APIs are no longer active.
 
 ### Changed
 
-- **Optional VTK dependency**: Updated VTK from 9.4 to 9.6.2 to incorporate upstream security fixes.
+- **Time-aware array details** (`omni.cae.property.bundle` 2.2.1): Array statistics now retain their
+  effective timeline sample, remain visible with an obsolete-data warning after the sample changes,
+  and can be refreshed explicitly without triggering heavy array reads during playback or scrubbing.
+- **CAE USD plugin format surface** (`omni.cae.usd_plugins` 1.2.0,
+  `omni.cae.usd_plugins_importers` 1.2.0): Removed the retired ParaView
+  color-map format and narrowed Trimesh support to STL, PLY, and 3MF.
+- **Plugin schema imports** (`omni.cae.schema` 2.1.0): Plugin schemas are now
+  imported from the `pxr` namespace. The old `omni.cae.schema.<name>` modules
+  are no longer published.
 
-## [2.1.1]
+### Removed
 
-### Changed
-
-- **Kit SDK 110.1.2 support**: Added Kit SDK 110.1.2 to `select_kit_version` and promoted it to the
-  default Kit version. The release includes refreshed 110.1.2 app, streaming, and Kit-CAE templates,
-  plus the matching Packman/repo tooling updates needed for the newer Kit SDK.
+- **Retired legacy CAE extensions**: The legacy `omni.cae.algorithms.*`,
+  `omni.cae.flow`, `omni.cae.material_library`, `omni.cae.schema.simh`,
+  `omni.cae.sids`, `omni.cae.simh`, and `omni.cae.vtk` extensions are no
+  longer included.
+- **Legacy visualization command paths**: Removed the legacy `omni.cae.data` command APIs (`Voxelize`,
+  `GenerateStreamlines`, `ConvertToPointCloud`, `ComputeBounds`, `ComputeIJKExtents`, `ConvertToMesh`), old
+  algorithm and Flow context menus. Data conversion and visualization
+  processing now use the `omni.cae.simdata` and `omni.cae.viz` operator APIs.
+- **Retired the file-format / importer / native-library extensions**: The standalone `omni.cae.file_format.cgns`,
+  `omni.cae.importer.*`, `omni.cae.delegate.*`, `omni.cae.cgns_libs`, `omni.cae.hdf5_libs`, and
+  `omni.cae.vtk_libs` extensions are no longer part of
+  the active stack. Their behavior is provided by `omni.cae.usd_plugins` and
+  `omni.cae.usd_plugins_importers`.
+- **Pruned `omni.cae.core` API surface**: Removed obsolete range/time-bracketing helpers, stale SCI
+  array USD helpers, the legacy settings page, and the legacy `omni.cae.data` typing/types modules.
+- **Dropped support for Kit SDK 108.\***: Kit SDK 109.0.1 or newer is now
+  required.
 
 ### Fixed
 
-- **Warp 1.13 compatibility** (`omni.cae.data`): Updated CAE data array helpers to avoid removed
-  `warp.context.Device`, `warp.types.DType`, and `warp.types.vector_types` APIs, allowing
-  `omni.cae.kit` and the bundled CAE extensions to start with `omni.warp.core` 1.13.
-- **Bundled DAV runtime for Warp 1.13** (`omni.cae.dav_libs`): Updated the bundled DAV snapshot and
-  submodule branch to the Kit-CAE v2 line used for Warp 1.13-compatible DAV code.
+- **Empty iso-surface visibility** (`omni.cae.viz` 2.4.0): Iso-surfaces that generate no points or
+  elements are hidden until a later execution produces renderable geometry, preventing stale
+  surfaces from remaining visible.
+- **Interactive ROI transform updates** (`omni.cae.viz` 2.1.1): Operators using
+  `CaeVizDatasetSubsetAPI.roi` or `CaeVizDatasetVoxelizationAPI.roi` now re-execute when the ROI
+  target prim's transform changes, so moving a bounding-box ROI refreshes subset and voxelized
+  results without toggling the operator.
+- **Trimesh USD plugin registration on Windows**: Fixed Trimesh plugin
+  registration on Windows, removing a startup warning.
+- **Cached SimData dataset mutation**: `ConvertToSimDataSet.invoke` returns a shallow copy of the cached
+  dataset, so downstream callers cannot accidentally mutate the cached entry.
 
 ## [2.1.0]
 

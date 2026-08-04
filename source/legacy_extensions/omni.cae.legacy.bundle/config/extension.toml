@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+[package]
+version = "1.0.0"
+title = "CAE Legacy Data Delegate Bundle"
+description = "Compatibility bundle for the deprecated CAE Data Delegate and legacy file delegates."
+category = "CAE"
+keywords = ["cae", "legacy", "data", "delegate"]
+changelog = "docs/CHANGELOG.md"
+readme = "docs/README.md"
+
+[dependencies]
+"omni.cae.data" = {}
+"omni.cae.simdata.legacy" = {}
+"omni.cae.property.legacy" = {}
+"omni.cae.delegate.cgns" = {}
+"omni.cae.delegate.ensight" = {}
+"omni.cae.delegate.hdf5" = {}
+"omni.cae.delegate.npz" = {}
+"omni.cae.delegate.nvdb" = {}
+"omni.cae.delegate.openfoam" = {}
+"omni.cae.delegate.trimesh" = {}
+"omni.cae.delegate.vtk" = {}
+
+[[python.module]]
+name = "omni.cae.legacy.bundle"
+
+[documentation]
+pages = [
+    "docs/README.md",
+    "docs/CHANGELOG.md",
+]

@@ -191,8 +191,8 @@ directly via `references/messaging-api.md` when you need finer control.
 
 ```python
 from omniverse_api import OmniverseAPI, exclusive
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core.commands import execute_command
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.cae.testing import wait_for_update
 
 api = OmniverseAPI()

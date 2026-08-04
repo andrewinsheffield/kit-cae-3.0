@@ -10,12 +10,12 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
-from pxr import Usd
+from pxr import Usd, UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
@@ -29,9 +29,11 @@ async def main():
     ctx = get_context()
     stage: Usd.Stage = ctx.get_stage()
 
+    # Create CAE anchor
+    UsdGeom.Xform.Define(stage, "/World/CAE")
+
     # 1. Create bounding box
     dataset_path: str = "/World/StaticMixer/Base/StaticMixer/B1_P3"
-    flow_solution_path: str = "/World/StaticMixer/Base/StaticMixer/Flow_Solution"
     bbox_path: str = "/World/CAE/BoundingBox_B1_P3"
     await execute_command("CreateCaeVizBoundingBox", dataset_paths=[dataset_path], prim_path=bbox_path)
 
@@ -42,7 +44,7 @@ async def main():
 
     # Color by Temperature
     colors_fs_api = cae_viz.FieldSelectionAPI(glyphs_prim, "colors")
-    colors_fs_api.CreateTargetRel().SetTargets([f"{flow_solution_path}/Temperature"])
+    colors_fs_api.CreateFieldNamesAttr().Set(["Temperature"])
 
     # Scale by Pressure
     cae_viz.FieldMappingAPI.Apply(glyphs_prim, "scales")
@@ -52,13 +54,11 @@ async def main():
     field_mapping_api.CreateDomainAttr().Set((-930, 1300))
 
     scales_fs_api = cae_viz.FieldSelectionAPI(glyphs_prim, "scales")
-    scales_fs_api.CreateTargetRel().SetTargets([f"{flow_solution_path}/Pressure"])
+    scales_fs_api.CreateFieldNamesAttr().Set(["Pressure"])
 
     # Orientation by VelocityX, VelocityY, VelocityZ
     orientation_fs_api = cae_viz.FieldSelectionAPI(glyphs_prim, "orientations")
-    orientation_fs_api.CreateTargetRel().SetTargets(
-        [f"{flow_solution_path}/VelocityX", f"{flow_solution_path}/VelocityY", f"{flow_solution_path}/VelocityZ"]
-    )
+    orientation_fs_api.CreateFieldNamesAttr().Set(["VelocityX", "VelocityY", "VelocityZ"])
     await wait_for_update()
 
     # 3. Frame the bounding box

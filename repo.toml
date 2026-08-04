@@ -52,10 +52,12 @@ fetch.packman_target_files_to_pull = [
 # Note: Schema compilation is now handled by premake (via repo_build), so we only generate here
 # This replaces the base template's after_pull_commands, so we must include precache_exts
 fetch."platform:linux-x86_64".after_pull_commands = [
+    ["${root}/_build/target-deps/python/bin/python3", "${root}/tools/use_local_dependencies.py"],
     ["${root}/repo.sh", "schema", "-c", "${config}", "--generate-only", "--no-warn"],
     ["${root}/repo.sh", "precache_exts", "-c", "${config}"],
 ]
 fetch."platform:windows-x86_64".after_pull_commands = [
+    ["${root}/_build/target-deps/python/python.exe", "${root}/tools/use_local_dependencies.py"],
     ["${root}/repo.bat", "schema", "-c", "${config}", "--generate-only", "--no-warn"],
     ["${root}/repo.bat", "precache_exts", "-c", "${config}"],
 ]
@@ -129,7 +131,7 @@ publish_pip_cache = false
 ########################################################################################################################
 
 [repo_precache_exts]
-# Extension search folders (extends base template to include legacy extensions)
+# Extension search folders (extends base template to include Kit-CAE extensions/apps)
 ext_folders = [
   "${root}/source/extensions",
   "${root}/source/legacy_extensions",

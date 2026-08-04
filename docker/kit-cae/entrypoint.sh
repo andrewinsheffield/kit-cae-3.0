@@ -84,7 +84,6 @@ CMD=(
   "${KIT_FILE}"
   "--no-window"
   "--enable omni.cae.delegate.vtk"
-  "--enable omni.cae.importer.vtk"
   "--ext-folder"
   "/home/ubuntu/.local/share/ov/data/exts/v2"
   "${EXTRA_ARGS[@]}"

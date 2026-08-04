@@ -1,4 +1,12 @@
-# Omni CAE USD Schema
+# Legacy Omni CAE USD Schema
+
+> [!IMPORTANT]
+> This is the detailed reference for the legacy `CaeDataSet` / `CaeFieldArray`
+> schema family. New datasets in Kit-CAE use `OmniSciDataset` with multiple-apply
+> `OmniSciArrayAPI` and `OmniSciFieldAPI` instances so array values participate in
+> standard USD value resolution. Start with [Scientific Data Schemas](./UsdSchemas.md)
+> for the active model. This document is retained for compatibility with existing
+> stages and the extensions under `source/legacy_extensions`.
 
 ## TLDR;
 

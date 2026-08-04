@@ -3,6 +3,7 @@ Eval 02 Validator: Volume Render
 Runs inside Kit-CAE via --exec. Imports StaticMixer.cgns, creates a volume,
 verifies field binding, and checks the output screenshot.
 """
+
 import asyncio
 import json
 import os
@@ -10,15 +11,18 @@ import struct
 
 import omni.kit.app
 import omni.usd
-from omni.cae.data.commands import execute_command
-from omni.cae.schema import cae, viz as cae_viz
+from omni.cae.core.commands import execute_command
+from omni.cae.schema import cae
+from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, wait_for_update
-from omni.kit.viewport.utility import get_active_viewport, capture_viewport_to_file
+from omni.cae.usd_plugins_importers import import_to_stage
+from omni.kit.viewport.utility import capture_viewport_to_file, get_active_viewport
 from omni.usd import get_context
 from pxr import Tf, Usd, UsdGeom
 
 RENDER_DIR = os.environ.get("KIT_CAE_EVAL_RENDER_DIR") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data", "renders")
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data", "renders"
+)
 os.makedirs(RENDER_DIR, exist_ok=True)
 OUTPUT_PATH = os.path.join(RENDER_DIR, "eval_02_volume.png")
 
@@ -29,7 +33,6 @@ async def main():
 
     # 1. Import
     try:
-        from omni.cae.importer.cgns import import_to_stage
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data")
         await import_to_stage(os.path.join(data_dir, "StaticMixer.cgns"), "/World/StaticMixer")
         await wait_for_update(20)
@@ -44,7 +47,6 @@ async def main():
 
     # 2. Create volume
     dataset_path = "/World/StaticMixer/Base/StaticMixer/B1_P3"
-    field_path = "/World/StaticMixer/Base/StaticMixer/Flow_Solution/Eddy_Viscosity"
     vol_path = "/World/CAE/Volume"
     bbox_path = "/World/CAE/BoundingBox"
 
@@ -54,7 +56,7 @@ async def main():
         await wait_for_update(10)
 
         vol_prim = stage.GetPrimAtPath(vol_path)
-        cae_viz.FieldSelectionAPI(vol_prim, "colors").CreateTargetRel().SetTargets([field_path])
+        cae_viz.FieldSelectionAPI(vol_prim, "colors").CreateFieldNamesAttr().Set(["Eddy_Viscosity"])
         await wait_for_update(10)
 
         checks.append({"name": "volume_created", "pass": True, "detail": vol_path})
@@ -69,17 +71,21 @@ async def main():
     # 4. Verify field binding
     if prim_exists:
         colors_api = cae_viz.FieldSelectionAPI(vol_prim, "colors")
-        targets = colors_api.GetTargetRel().GetTargets()
-        field_bound = len(targets) > 0 and "Eddy_Viscosity" in str(targets[0])
-        checks.append({"name": "field_bound", "pass": field_bound,
-                        "detail": str(targets[0]) if targets else "No targets"})
+        field_names = colors_api.GetFieldNamesAttr().Get() or []
+        field_bound = "Eddy_Viscosity" in field_names
+        checks.append(
+            {
+                "name": "field_bound",
+                "pass": field_bound,
+                "detail": str(field_names) if field_names else "No field names",
+            }
+        )
     else:
         checks.append({"name": "field_bound", "pass": False, "detail": "No volume prim"})
 
     # 5. Verify bounding box
     bbox_prim = stage.GetPrimAtPath(bbox_path)
-    checks.append({"name": "bbox_exists", "pass": bool(bbox_prim and bbox_prim.IsValid()),
-                    "detail": bbox_path})
+    checks.append({"name": "bbox_exists", "pass": bool(bbox_prim and bbox_prim.IsValid()), "detail": bbox_path})
 
     # 6. Capture screenshot
     try:
@@ -96,16 +102,19 @@ async def main():
         # Check file exists and is non-trivial
         file_exists = os.path.isfile(OUTPUT_PATH)
         file_size = os.path.getsize(OUTPUT_PATH) if file_exists else 0
-        checks.append({"name": "screenshot_exists", "pass": file_exists and file_size > 10000,
-                        "detail": f"{OUTPUT_PATH} ({file_size} bytes)"})
+        checks.append(
+            {
+                "name": "screenshot_exists",
+                "pass": file_exists and file_size > 10000,
+                "detail": f"{OUTPUT_PATH} ({file_size} bytes)",
+            }
+        )
 
         # Check not entirely black (read PNG header for dimensions)
         if file_exists and file_size > 10000:
-            checks.append({"name": "screenshot_not_trivial", "pass": True,
-                            "detail": f"File size {file_size} > 10KB"})
+            checks.append({"name": "screenshot_not_trivial", "pass": True, "detail": f"File size {file_size} > 10KB"})
         else:
-            checks.append({"name": "screenshot_not_trivial", "pass": False,
-                            "detail": f"File too small: {file_size}"})
+            checks.append({"name": "screenshot_not_trivial", "pass": False, "detail": f"File too small: {file_size}"})
     except Exception as e:
         checks.append({"name": "screenshot_exists", "pass": False, "detail": str(e)})
 
@@ -131,6 +140,7 @@ def _shutdown(app):
         for _ in range(10):
             await app.next_update_async()
         os._exit(0)
+
     asyncio.ensure_future(_do_shutdown())
 
 

@@ -14,7 +14,6 @@
 
 #include <nv/index/idistributed_data_import_callback.h>
 #include <nv/index/iirregular_volume_subset.h>
-#include <omni/cae/data/IFieldArray.h>
 
 #include <map>
 #include <memory>

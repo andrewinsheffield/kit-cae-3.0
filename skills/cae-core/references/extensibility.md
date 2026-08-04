@@ -1,110 +1,57 @@
 # Format Extensibility
 
-Kit-CAE onboards new formats via 4 layers:
+New formats use the active USD-plugin architecture:
 
-| Layer | Role | Example |
-|-------|------|---------|
-| USD Schema | Format-specific `CaeFieldArray` attributes | `omniCaeScae` |
-| Data Delegate | Lazy runtime data reading (`get_field_array`) | `omni.cae.delegate.scae` |
-| Asset Importer | Creates USD stage hierarchy on import | `omni.cae.importer.scae` |
-| API Schema | Declares topology | `CaePointCloudAPI`, `CaeSidsUnstructuredAPI`, `CaeDenseVolumeAPI` |
+| Layer | Owner | Responsibility |
+|---|---|---|
+| Conceptual data mapping | CAE OpenUSD Plugins | Defines hierarchy, schemas, arrays, time, arguments, and capability limits. |
+| `OmniSci*` schemas | CAE OpenUSD Plugins | Describes datasets, arrays, fields, and format-specific semantics. |
+| `SdfFileFormat` reader | CAE OpenUSD Plugins | Builds inexpensive stage structure and lazily materializes array values. |
+| `PayloadImporter` registration | Kit-CAE | Adds File > Import and the unified `import_to_stage()` dispatch entry. |
+| SimData adapter | Warp SimData | Converts supported OmniSci data models for visualization operators. |
 
-**API Schema selection:**
+Do not create a `CaeFieldArray` subtype, Data Delegate, or
+`omni.cae.importer.<format>` extension for a new integration. Those surfaces are
+retained only for legacy stages.
 
-| Data type | API Schema | VTK equivalent |
-|-----------|-----------|----------------|
-| Point coordinates only | `CaePointCloudAPI` | — |
-| Mesh connectivity | `CaeSidsUnstructuredAPI` | UnstructuredGrid |
-| Structured IJK grid | `CaeDenseVolumeAPI` | ImageData |
+## Required contracts
 
-`CaeDenseVolumeAPI` requires `minExtent`, `maxExtent`, `spacing` attributes.
+- Arrays live on an `OmniSciDataset` as `OmniSciArrayAPI:<instance>`.
+- Field meaning uses the matching `OmniSciFieldAPI:<instance>`.
+- Large `value` attributes are registered with their final USD type and loaded
+  only when requested.
+- Format controls that belong on a payload prim use a typed
+  `OmniSciFileFormatArgs*API`.
+- Kit's importer authors a payload; it does not parse or copy source data.
+- Visualization field selections use `CaeVizFieldSelectionAPI.fieldNames`.
 
-**⚠ Dense-volume flat byte layout (Fortran order):** The voxelization kernel
-expects the field-array payload to be in **Fortran order** (i-fastest), so that
-`flat[i + j*ni + k*ni*nj] == data[i,j,k]`. A numpy array of shape `(ni, nj, nk)`
-written with the default `.tobytes()` (C order) has `k` fastest and will render
-as garbage or a spatially-constant blob that appears not to update with time.
-Always write payloads via `np.asfortranarray(arr).tobytes(order="F")`.
+## Kit importer registration
 
-**Full tutorial:** `docs/FormatOnboarding.md`
-**Working reference:** `docs/format_tutorial_reference/` — complete SCAE format
-implementation (schema, delegate, importer, data generator). Copy structure for
-new formats.
+Add a `PayloadImporter` subclass to
+`omni.cae.usd_plugins_importers/python/_importers.py` and add it to
+`IMPORTER_TYPES` in `_registry.py`:
 
-## Build System Requirements
-
-### Per-extension files
-
-```
-source/extensions/omni.cae.<type>.<name>/
-    premake5.lua              # REQUIRED — without this, extension silently skipped
-    config/extension.toml
-    python/__init__.py        # MUST import Extension (see below)
-    python/extension.py
-    python/<implementation>.py
-```
-
-### __init__.py MUST re-export Extension (CRITICAL)
-
-`python/__init__.py` must contain:
 ```python
-from .extension import Extension  # noqa: F401
+class ExampleAssetImporter(PayloadImporter):
+    importer_name = "CAE Example Importer"
+    file_extensions = (".example",)
+    importer_filter_descriptions = ["Example Files (*.example)"]
+    schema_api = "OmniSciFileFormatArgsExampleAPI"
 ```
-Without this, Kit logs `[ext: ...] startup` but **never calls `on_startup()`**.
-The delegate/importer silently does nothing — no error, no registration.
-This applies to both delegates and importers.
 
-**Importers must also expose `import_to_stage` at package level** so callers can
-`from omni.cae.importer.<name> import import_to_stage`:
+All registered formats then use:
+
 ```python
-# python/__init__.py
-from .extension import Extension          # noqa: F401
-from .importer import import_to_stage     # noqa: F401
+from omni.cae.usd_plugins_importers import import_to_stage
+
+await import_to_stage(path, "/World/Example", **format_args)
 ```
 
-### premake5.lua (CRITICAL)
+## Validation
 
-```lua
-local ext = get_current_extension_info()
-project_ext(ext)
-repo_build.prebuild_link {
-    { "python", ext.target_dir.."/<dotted>/<module>/<path>" },
-}
-```
+Test plugin registration, stage structure, schemas, lazy values, arguments,
+time behavior, importer dispatch, payload authoring, SimData conversion, and at
+least one visualization operator. Validate the installed plugin package inside
+Kit-CAE with the local artifact workflow in `docs/Build.md`.
 
-Target path must match Python import path (e.g., `omni/cae/delegate/nvol/`).
-
-### extension.toml rules
-
-- `[[python.module]]`: `name` only, NOT `path` (premake handles it)
-- Dependencies: `omni.cae.data`, `omni.cae.schema`, and `omni.cae.dav` (for delegates)
-- Delegates: register format in `[settings.exts."omni.cae.data".formats]`
-- Importers: use `ai.register_importer()` (NOT `get_importer().register_importer()`)
-
-### Schema registration (3 places)
-
-1. `repo_schemas.toml` — `[[schema_library]]` entry
-2. `source/schemas/premake5.lua` — add to `install_usdgenschema` list
-3. `source/extensions/omni.cae.schema/.../cae.py` — Python class wrapper
-
-### Bundle wiring
-
-Add new extensions as deps in `omni.cae.bundle/config/extension.toml`.
-
-### DAV command naming
-
-Delegates must define `{SchemaName}ConvertToDAVDataSet` command
-(e.g., `CaeDenseVolumeConvertToDAVDataSet`). Dispatch looks up by applied API schema name.
-
-**Before applying a shared API schema, check whether a default converter already ships.**
-`omni.cae.dav.commands` bundles converters for `CaePointCloudAPI`, `CaeMeshAPI`,
-`CaeSidsUnstructuredAPI`, and each `CaeVtk*API`. **`CaeDenseVolumeAPI` has no bundled
-converter** — if your importer applies it, your delegate extension must also register
-`CaeDenseVolumeConvertToDAVDataSet` (use `CaeVtkImageDataConvertToDAVDataSet` as a
-~15-line reference). Without it, `CreateCaeVizVolume` fails with
-`NotImplementedError: Failed to execute command 'ConvertToDAVDataSet'` at render time.
-
-### Post-onboarding
-
-- Update `kit-cae-api.md` Stage Discovery container list with new format's data container names
-- Clean rebuild: `./repo.sh build -xr`
+See `docs/FormatOnboarding.md` for the complete sequence.

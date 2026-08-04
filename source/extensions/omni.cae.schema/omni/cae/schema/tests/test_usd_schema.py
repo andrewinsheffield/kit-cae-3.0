@@ -10,8 +10,8 @@
 
 import omni.kit.test
 import omni.usd
-from omni.cae.schema import cae, ensight, sids, vtk
-from pxr import Sdf, Usd
+from omni.cae.schema import cae, sids, viz, vtk
+from pxr import Sdf, Usd, UsdVol
 
 
 class Test(omni.kit.test.AsyncTestCase):
@@ -43,10 +43,14 @@ class Test(omni.kit.test.AsyncTestCase):
         self.assertTrue(
             vtkFieldArray.GetPrim().IsA(cae.FieldArray), "vtk.FieldArray must be a sub-type of cae.FieldArray"
         )
-
-        registry = Usd.SchemaRegistry()
-        self.assertEqual(
-            registry.GetSchemaTypeName(sids.UnstructuredAPI), "CaeSidsUnstructuredAPI", "Missing SidsUnstructuredAPI"
-        )
         # stage.Save()
         # logging.warning("generated '/tmp/sample.usda'")
+
+    async def test_index_axisymmetric_volume_api(self):
+        stage = Usd.Stage.CreateInMemory()
+        volume = UsdVol.Volume.Define(stage, "/Volume")
+        api = viz.IndeXAxisymmetricVolumeAPI.Apply(volume.GetPrim())
+
+        self.assertTrue(api)
+        self.assertTrue(volume.GetPrim().HasAPI(viz.IndeXAxisymmetricVolumeAPI))
+        self.assertEqual(api.GetSamplingDistanceScaleAttr().Get(), 1.0)

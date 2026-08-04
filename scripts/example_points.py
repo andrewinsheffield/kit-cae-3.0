@@ -10,12 +10,12 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
-from pxr import Usd
+from pxr import Usd, UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
@@ -29,9 +29,11 @@ async def main():
     ctx = get_context()
     stage: Usd.Stage = ctx.get_stage()
 
+    # Create CAE anchor
+    UsdGeom.Xform.Define(stage, "/World/CAE")
+
     # 1. Create bounding box
     dataset_path: str = "/World/StaticMixer/Base/StaticMixer/B1_P3"
-    flow_solution_path: str = "/World/StaticMixer/Base/StaticMixer/Flow_Solution"
     bbox_path: str = "/World/CAE/BoundingBox_B1_P3"
     await execute_command("CreateCaeVizBoundingBox", dataset_paths=[dataset_path], prim_path=bbox_path)
 
@@ -46,7 +48,7 @@ async def main():
 
     # Color by Temperature
     colors_fs_api = cae_viz.FieldSelectionAPI(points_prim, "colors")
-    colors_fs_api.CreateTargetRel().SetTargets([f"{flow_solution_path}/Temperature"])
+    colors_fs_api.CreateFieldNamesAttr().Set(["Temperature"])
     await wait_for_update()
 
     # Width by Pressure
@@ -54,13 +56,7 @@ async def main():
     # Specifies the range for the widths field mapped to the range of the Velocity magnitude field
     field_mapping_api.CreateRangeAttr().Set((0.01, 0.2))
     widths_fs_api = cae_viz.FieldSelectionAPI(points_prim, "widths")
-    widths_fs_api.CreateTargetRel().SetTargets(
-        [
-            f"{flow_solution_path}/VelocityX",
-            f"{flow_solution_path}/VelocityY",
-            f"{flow_solution_path}/VelocityZ",
-        ]
-    )
+    widths_fs_api.CreateFieldNamesAttr().Set(["VelocityX", "VelocityY", "VelocityZ"])
     # Mode can be used to compute magnitude of the vector field on the fly
     widths_fs_api.CreateModeAttr().Set(cae_viz.Tokens.vector_magnitude)
     await wait_for_update()

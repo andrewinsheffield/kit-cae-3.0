@@ -22,7 +22,6 @@ For local development and testing:
 ```sh
 # Build Kit-CAE (see Build Instructions)
 cd <path-to-kit-cae>
-./repo.sh schema
 ./repo.sh build -r
 
 # Build your KAT application
@@ -39,19 +38,19 @@ From your KAT application directory:
 ./repo.sh launch -n <your-app> -- \
       --ext-folder <path-to-kit-cae>/_build/linux-x86_64/release/exts \
       --ext-folder <path-to-kit-cae>/_build/linux-x86_64/release/apps \
-      --enable omni.cae
+      --enable omni.cae.bundle
 
 # On Windows
 repo.bat launch -n <your-app> -- \
       --ext-folder <path-to-kit-cae>\_build\windows-x86_64\release\exts \
       --ext-folder <path-to-kit-cae>\_build\windows-x86_64\release\apps \
-      --enable omni.cae
+      --enable omni.cae.bundle
 ```
 
 ### Extension Variants
 
-- **Basic CAE**: `--enable omni.cae`
-- **With VTK**: `--enable omni.cae_vtk`
+- **Active CAE stack**: `--enable omni.cae.bundle`
+- **Legacy data delegates**: `--enable omni.cae.legacy.bundle`
 - **Individual Extensions**: `--enable <ext-name>` for specific extensions
 
 ## Full Integration (Packaging)
@@ -79,7 +78,7 @@ ways to do this; the simplest is using `before_pull_commands` as follows:
 fetch.before_pull_commands = [
   # tell Kit-CAE to use same Kit-version as we will use for your app
   # `--no-use-symlinks` ensure we can package Kit-CAE .kit files without additional steps.
-  ["${root}/kit-cae/repo${shell_ext}", "select_kit_version", "--version", "109.0.3", "--no-use-symlinks"],
+  ["${root}/kit-cae/repo${shell_ext}", "select_kit_version", "--auto", "--no-use-symlinks"],
 
   # build kit-cae
   ["${root}/kit-cae/repo${shell_ext}", "--set-token", "vs_version=${vs_version}", "build", "-r"]
@@ -101,7 +100,6 @@ ext_folders = [
 
   # Kit-CAE dirs
   "${root}/kit-cae/source/extensions",
-  "${root}/kit-cae/source/legacy_extensions",
   "${root}/kit-cae/source/apps",
 ]
 ```
@@ -181,8 +179,8 @@ You don't need to enable all Kit-CAE extensions. Choose what you need:
 ./repo.sh launch -n <your-app> -- \
       --ext-folder <kit-cae-exts> \
       --enable omni.cae.schema \
-      --enable omni.cae.delegate.cgns \
-      --enable omni.cae.importer.cgns
+      --enable omni.cae.usd_plugins \
+      --enable omni.cae.usd_plugins_importers
 ```
 
 See [Extensions Overview](./Extensions.md) for a complete list of available extensions.
@@ -204,7 +202,7 @@ If extensions fail to load:
 1. Verify extension paths are correct in launch commands
 2. Check that dependencies are built
 3. Review console output for specific error messages
-4. Ensure required pip packages are installed (for VTK, etc.)
+4. If using a legacy delegate, ensure its optional pip packages are installed
 
 ## Related Documentation
 

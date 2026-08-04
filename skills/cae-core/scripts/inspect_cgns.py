@@ -1,106 +1,62 @@
 #!/usr/bin/env python3
-"""Inspect a CGNS file structure using h5py.
+"""Inspect a CGNS asset through the native OpenUSD file-format plugin.
 
-Prints bases, zones, datasets, flow solutions, and field arrays with
-shapes and dtypes.
-
-Runs inside Kit-CAE via --exec. Reads the target file path from the
-environment variable ``CAE_INSPECT_FILE``.
-
-Usage (from the kit-cae repo root):
+Usage from the Kit-CAE repository root:
     CAE_INSPECT_FILE=/path/to/file.cgns ./repo.sh launch -n omni.cae.kit -- \
         --exec skills/cae-core/scripts/inspect_cgns.py --no-window
 """
 
 import asyncio
+import json
 import os
-import sys
 
 import omni.kit.app
-
-# h5py is available inside Kit via pip_prebundle
-import h5py
-
-
-def inspect_cgns(filepath):
-    print(f"\n=== CGNS File: {filepath} ===\n")
-
-    with h5py.File(filepath, "r") as f:
-        for base_name in sorted(f.keys()):
-            base = f[base_name]
-            if not isinstance(base, h5py.Group):
-                continue
-
-            label = ""
-            if " label" in base.attrs:
-                raw = base.attrs[" label"]
-                label = raw.decode() if isinstance(raw, bytes) else str(raw)
-
-            print(f"Base: {base_name}  ({label})")
-
-            for zone_name in sorted(base.keys()):
-                zone = base[zone_name]
-                if not isinstance(zone, h5py.Group):
-                    continue
-
-                zone_label = ""
-                if " label" in zone.attrs:
-                    raw = zone.attrs[" label"]
-                    zone_label = raw.decode() if isinstance(raw, bytes) else str(raw)
-
-                print(f"  Zone: {zone_name}  ({zone_label})")
-
-                for child_name in sorted(zone.keys()):
-                    child = zone[child_name]
-                    if not isinstance(child, h5py.Group):
-                        continue
-
-                    child_label = ""
-                    if " label" in child.attrs:
-                        raw = child.attrs[" label"]
-                        child_label = raw.decode() if isinstance(raw, bytes) else str(raw)
-
-                    print(f"    {child_name}  ({child_label})")
-
-                    for field_name in sorted(child.keys()):
-                        field = child[field_name]
-                        if isinstance(field, h5py.Group):
-                            if " data" in field:
-                                data = field[" data"]
-                                print(f"      {field_name}  [{data.dtype}, shape={data.shape}]")
-                            else:
-                                fl = ""
-                                if " label" in field.attrs:
-                                    raw = field.attrs[" label"]
-                                    fl = raw.decode() if isinstance(raw, bytes) else str(raw)
-                                print(f"      {field_name}  ({fl})")
-                        elif isinstance(field, h5py.Dataset):
-                            print(f"      {field_name}  [{field.dtype}, shape={field.shape}]")
-
-    print("\n--- Stage path mapping (after import to /World/<root>) ---")
-    print("Datasets:  /World/<root>/Base/<ZoneName>/<DatasetName>")
-    print("Fields:    /World/<root>/Base/<ZoneName>/<FlowSolution>/<FieldName>")
-    print("")
-    print("NOTE: Dots and spaces in CGNS names become underscores in USD paths.")
-    print("  e.g., 'B1.P3' -> 'B1_P3', 'Flow Solution' -> 'Flow_Solution'")
+from omni.cae.core import usd_utils
+from omni.cae.usd_plugins_importers import import_to_stage
+from omni.usd import get_context
+from pxr import OmniSci
 
 
 async def main():
     app = omni.kit.app.get_app()
-
     file_path = os.environ.get("CAE_INSPECT_FILE", "")
-    if not file_path:
-        print("ERROR: Set CAE_INSPECT_FILE=/path/to/file.cgns before launching.")
-    elif not os.path.isfile(file_path):
-        print(f"ERROR: File not found: {file_path}")
-    else:
-        inspect_cgns(file_path)
+    if not file_path or not os.path.isfile(file_path):
+        print(f"ERROR: CAE_INSPECT_FILE not set or file not found: {file_path!r}")
+        await _quit(app, 1)
+        return
 
-    print("INSPECT_COMPLETE")
-    app.post_quit()
+    await import_to_stage(file_path, "/World/InspectTarget")
     for _ in range(10):
         await app.next_update_async()
-    os._exit(0)
+
+    print("INSPECT_BEGIN")
+    print(json.dumps(_describe_stage(), indent=2))
+    print("INSPECT_END")
+    await _quit(app, 0)
+
+
+def _describe_stage():
+    stage = get_context().get_stage()
+    result = {"datasets": []}
+    for dataset in (prim for prim in stage.Traverse() if prim.IsA(OmniSci.Dataset)):
+        fields = []
+        for name in usd_utils.get_instances(dataset, "OmniSciFieldAPI"):
+            fields.append(
+                {
+                    "name": name,
+                    "association": dataset.GetAttribute(f"omni:sci:field:{name}:association").Get(),
+                    "type": str(dataset.GetAttribute(f"omni:sci:array:{name}:value").GetTypeName()),
+                }
+            )
+        result["datasets"].append({"path": str(dataset.GetPath()), "fields": fields})
+    return result
+
+
+async def _quit(app, exit_code):
+    app.post_quit(exit_code)
+    for _ in range(10):
+        await app.next_update_async()
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":

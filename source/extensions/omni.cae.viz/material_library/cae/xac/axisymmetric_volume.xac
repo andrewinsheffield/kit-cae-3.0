@@ -1,0 +1,111 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+NV_IDX_XAC_VERSION_1_0
+
+using namespace nv::index::xac;
+
+struct Params
+{
+    float4 lookup_voxel_sizes_0_3;
+    float4 lookup_voxel_sizes_4_7;
+    int lookup_level_count;
+    float2 lookup_angle_range;
+};
+
+class Volume_sample_program
+{
+    NV_IDX_VOLUME_SAMPLE_PROGRAM
+
+    Params m_params;
+
+public:
+    NV_IDX_DEVICE_INLINE_MEMBER
+    void initialize()
+    {
+        m_params = *state.bind_parameter_buffer<Params>(0);
+    }
+
+    NV_IDX_DEVICE_INLINE_MEMBER
+    bool sample_level(
+        const VDB_volume& volume,
+        const int attribute,
+        const float spacing,
+        const float radius,
+        const float axial,
+        float& value)
+    {
+        const float3 sample_position =
+            make_float3(radius, axial, 0.5f * spacing) / spacing - make_float3(0.5f);
+        const auto sampler = volume.template generate_sampler<
+            float,
+            VDB_volume_filter_mode::NEAREST,
+            float>(attribute);
+        value = sampler.fetch_sample(sample_position);
+        return value == value;
+    }
+
+    NV_IDX_DEVICE_INLINE_MEMBER
+    int execute(
+        const Sample_info_self& sample_info,
+        Sample_output& sample_output)
+    {
+        const auto& volume = state.self;
+        const float3 position =
+            transform_point(volume.get_scene_to_object_transform(), sample_info.scene_position);
+        const float radius = sqrt(position.x * position.x + position.z * position.z);
+        const float axial = position.y;
+        float value = 0.0f;
+
+        // Match Warp SimData's convention: zero is +X and angles increase
+        // toward +Z around the Y axis. The axis itself belongs to every
+        // partial revolution because its azimuth is geometrically undefined.
+        const float two_pi = 6.28318530717958647692f;
+        const bool is_full_revolution =
+            m_params.lookup_angle_range.x <= 1.0e-6f &&
+            m_params.lookup_angle_range.y >= two_pi - 1.0e-6f;
+        if (radius > 1.0e-6f && !is_full_revolution)
+        {
+            float angle = atan2(position.z, position.x);
+            if (angle < 0.0f)
+                angle += two_pi;
+            if (angle == 0.0f &&
+                m_params.lookup_angle_range.x > 0.0f &&
+                m_params.lookup_angle_range.y >= two_pi - 1.0e-6f)
+                angle = two_pi;
+            if (angle < m_params.lookup_angle_range.x - 1.0e-6f ||
+                angle > m_params.lookup_angle_range.y + 1.0e-6f)
+                return NV_IDX_PROG_DISCARD_SAMPLE;
+        }
+
+        if (m_params.lookup_level_count > 0 &&
+            sample_level(volume, 1, m_params.lookup_voxel_sizes_0_3.x, radius, axial, value))
+            goto found;
+        if (m_params.lookup_level_count > 1 &&
+            sample_level(volume, 2, m_params.lookup_voxel_sizes_0_3.y, radius, axial, value))
+            goto found;
+        if (m_params.lookup_level_count > 2 &&
+            sample_level(volume, 3, m_params.lookup_voxel_sizes_0_3.z, radius, axial, value))
+            goto found;
+        if (m_params.lookup_level_count > 3 &&
+            sample_level(volume, 4, m_params.lookup_voxel_sizes_0_3.w, radius, axial, value))
+            goto found;
+        if (m_params.lookup_level_count > 4 &&
+            sample_level(volume, 5, m_params.lookup_voxel_sizes_4_7.x, radius, axial, value))
+            goto found;
+        if (m_params.lookup_level_count > 5 &&
+            sample_level(volume, 6, m_params.lookup_voxel_sizes_4_7.y, radius, axial, value))
+            goto found;
+        if (m_params.lookup_level_count > 6 &&
+            sample_level(volume, 7, m_params.lookup_voxel_sizes_4_7.z, radius, axial, value))
+            goto found;
+        if (m_params.lookup_level_count > 7 &&
+            sample_level(volume, 8, m_params.lookup_voxel_sizes_4_7.w, radius, axial, value))
+            goto found;
+        return NV_IDX_PROG_DISCARD_SAMPLE;
+
+    found:
+        sample_output.set_color(state.self.get_colormap().lookup(value));
+        return NV_IDX_PROG_OK;
+    }
+};

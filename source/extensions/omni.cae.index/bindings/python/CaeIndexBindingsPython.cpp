@@ -18,29 +18,235 @@
 #include <nv/index/idistributed_data_subset.h>
 #include <nv/index/iirregular_volume_subset.h>
 #include <nv/index/ivdb_subset.h>
-#include <omni/cae/data/IFieldArray.h>
 #include <pybind11/numpy.h>
 #include <pybind11/operators.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cuda_runtime.h>
+#include <limits>
+#include <memory>
+#include <stdexcept>
+#include <string>
 
 namespace py = pybind11;
 
-CARB_BINDINGS("omni.cae.data.python")
+CARB_BINDINGS("omni.cae.index.python")
 PYBIND11_DECLARE_HOLDER_TYPE(T, mi::base::Handle<T>, true);
 
 namespace
 {
 
-size_t getSizeInBytes(const omni::cae::data::IFieldArray* array)
+enum class DLDeviceType : int32_t
 {
-    if (array)
+    kDLCPU = 1,
+    kDLCUDA = 2,
+    kDLCUDAHost = 3,
+    kDLCUDAManaged = 13,
+};
+
+struct DLDevice
+{
+    DLDeviceType device_type;
+    int32_t device_id;
+};
+
+struct DLDataType
+{
+    uint8_t code;
+    uint8_t bits;
+    uint16_t lanes;
+};
+
+struct DLTensor
+{
+    void* data;
+    DLDevice device;
+    int32_t ndim;
+    DLDataType dtype;
+    int64_t* shape;
+    int64_t* strides;
+    uint64_t byte_offset;
+};
+
+struct DLManagedTensor
+{
+    DLTensor dl_tensor;
+    void* manager_ctx;
+    void (*deleter)(DLManagedTensor* self);
+};
+
+constexpr const char* kDltensorCapsuleName = "dltensor";
+constexpr const char* kUsedDltensorCapsuleName = "used_dltensor";
+constexpr const char* kAdoptionCapsuleName = "omni.cae.index.dlpack_adoption";
+
+class DlpackAdoption
+{
+public:
+    DlpackAdoption(DLManagedTensor* tensor, py::object owner) : m_tensor(tensor), m_owner(std::move(owner))
     {
-        auto shape = array->getShape();
-        return std::accumulate(shape.begin(), shape.end(), static_cast<size_t>(1), std::multiplies<size_t>{}) *
-               omni::cae::data::getElementSize(array->getElementType());
     }
-    return 0u;
+
+    ~DlpackAdoption()
+    {
+        if (m_tensor && m_tensor->deleter)
+        {
+            m_tensor->deleter(m_tensor);
+        }
+    }
+
+    DlpackAdoption(const DlpackAdoption&) = delete;
+    DlpackAdoption& operator=(const DlpackAdoption&) = delete;
+
+private:
+    DLManagedTensor* m_tensor = nullptr;
+    py::object m_owner;
+};
+
+py::object makeAdoptionCapsule(DlpackAdoption* adoption)
+{
+    PyObject* capsule = PyCapsule_New(
+        adoption, kAdoptionCapsuleName,
+        [](PyObject* capsule)
+        {
+            auto* adoption = static_cast<DlpackAdoption*>(PyCapsule_GetPointer(capsule, kAdoptionCapsuleName));
+            delete adoption;
+        });
+    if (!capsule)
+    {
+        delete adoption;
+        throw py::error_already_set();
+    }
+    return py::reinterpret_steal<py::object>(capsule);
+}
+
+py::object getDlpackCapsule(py::object tensor, py::object stream)
+{
+    if (PyCapsule_IsValid(tensor.ptr(), kDltensorCapsuleName))
+    {
+        return tensor;
+    }
+
+    if (!py::hasattr(tensor, "__dlpack__"))
+    {
+        throw py::type_error("Expected an object implementing __dlpack__ or a DLPack capsule.");
+    }
+
+    py::object capsule;
+    if (stream.is_none())
+    {
+        capsule = tensor.attr("__dlpack__")();
+    }
+    else
+    {
+        capsule = tensor.attr("__dlpack__")(py::arg("stream") = stream);
+    }
+    if (!PyCapsule_IsValid(capsule.ptr(), kDltensorCapsuleName))
+    {
+        throw py::value_error("__dlpack__ did not return a valid 'dltensor' capsule.");
+    }
+    return capsule;
+}
+
+std::unique_ptr<DlpackAdoption> consumeDlpackTensor(py::object tensor, py::object stream, DLManagedTensor*& managed)
+{
+    py::object capsule = getDlpackCapsule(tensor, stream);
+    managed = static_cast<DLManagedTensor*>(PyCapsule_GetPointer(capsule.ptr(), kDltensorCapsuleName));
+    if (!managed)
+    {
+        throw py::error_already_set();
+    }
+
+    if (PyCapsule_SetName(capsule.ptr(), kUsedDltensorCapsuleName) != 0)
+    {
+        throw py::error_already_set();
+    }
+
+    return std::make_unique<DlpackAdoption>(managed, std::move(tensor));
+}
+
+mi::Size checkedMul(mi::Size lhs, mi::Size rhs, const char* what)
+{
+    if (rhs != 0 && lhs > std::numeric_limits<mi::Size>::max() / rhs)
+    {
+        throw std::overflow_error(std::string("DLPack tensor ") + what + " overflows mi::Size.");
+    }
+    return lhs * rhs;
+}
+
+mi::Size getElementSizeInBytes(const DLDataType& dtype)
+{
+    const auto bits = static_cast<mi::Size>(dtype.bits) * static_cast<mi::Size>(dtype.lanes);
+    if (bits == 0 || bits % 8 != 0)
+    {
+        throw py::value_error("DLPack tensor dtype must have a byte-addressable element size.");
+    }
+    return bits / 8;
+}
+
+mi::Size getCompactSizeInBytes(const DLTensor& tensor)
+{
+    if (tensor.ndim < 0)
+    {
+        throw py::value_error("DLPack tensor has a negative rank.");
+    }
+    if (tensor.ndim > 0 && !tensor.shape)
+    {
+        throw py::value_error("DLPack tensor is missing shape data.");
+    }
+
+    const mi::Size elementSize = getElementSizeInBytes(tensor.dtype);
+    mi::Size elementCount = 1;
+
+    if (tensor.strides)
+    {
+        mi::Size expectedStride = 1;
+        for (int32_t dim = tensor.ndim - 1; dim >= 0; --dim)
+        {
+            if (tensor.shape[dim] < 0)
+            {
+                throw py::value_error("DLPack tensor has a negative shape entry.");
+            }
+            if (expectedStride > static_cast<mi::Size>(std::numeric_limits<int64_t>::max()) ||
+                tensor.strides[dim] != static_cast<int64_t>(expectedStride))
+            {
+                throw py::value_error("DLPack tensor must be compact and C-contiguous.");
+            }
+            expectedStride = checkedMul(expectedStride, static_cast<mi::Size>(tensor.shape[dim]), "shape");
+        }
+        elementCount = expectedStride;
+    }
+    else
+    {
+        for (int32_t dim = 0; dim < tensor.ndim; ++dim)
+        {
+            if (tensor.shape[dim] < 0)
+            {
+                throw py::value_error("DLPack tensor has a negative shape entry.");
+            }
+            elementCount = checkedMul(elementCount, static_cast<mi::Size>(tensor.shape[dim]), "shape");
+        }
+    }
+
+    return checkedMul(elementCount, elementSize, "size");
+}
+
+void* getDlpackDataPointer(const DLTensor& tensor)
+{
+    if (!tensor.data)
+    {
+        throw py::value_error("DLPack tensor has a null data pointer.");
+    }
+    if (tensor.byte_offset > static_cast<uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()))
+    {
+        throw py::value_error("DLPack tensor byte_offset is too large.");
+    }
+    return static_cast<void*>(static_cast<char*>(tensor.data) + tensor.byte_offset);
+}
+
+bool isCudaDlpackDevice(DLDeviceType type)
+{
+    return type == DLDeviceType::kDLCUDA || type == DLDeviceType::kDLCUDAManaged;
 }
 
 
@@ -494,7 +700,6 @@ PYBIND11_MODULE(_omni_cae_index, m)
             "Get the device subset.")
         /**/;
 
-    using omni::cae::data::IFieldArray;
     py::class_<IVDB_subset_device, mi::base::Handle<IVDB_subset_device>>(m, "IVDB_subset_device")
         .def(
             "get_device_id",
@@ -505,19 +710,39 @@ PYBIND11_MODULE(_omni_cae_index, m)
             },
             "Get the device id.")
         .def(
-            "adopt_field_array",
-            [](IVDB_subset_device* self, mi::Uint32 index, carb::ObjectPtr<IFieldArray> field_array)
+            "adopt_dlpack",
+            [](IVDB_subset_device* self, mi::Uint32 index, py::object tensor, py::object stream) -> py::object
             {
-                py::gil_scoped_release g;
+                DLManagedTensor* managed = nullptr;
+                auto adoption = consumeDlpackTensor(std::move(tensor), std::move(stream), managed);
+                const DLTensor& dlTensor = managed->dl_tensor;
 
-                /// TODO: copy to correct device, if needed
-                if (!self->adopt_grid_buffer(
-                        index, const_cast<void*>(field_array->getData()), getSizeInBytes(field_array.get())))
+                if (!isCudaDlpackDevice(dlTensor.device.device_type))
                 {
-                    throw std::runtime_error("Failed to adopt field array.");
+                    throw py::value_error("VDB grid buffers must be hosted on a CUDA DLPack device.");
                 }
+
+                const auto targetDeviceId = static_cast<int32_t>(self->get_device_id());
+                if (dlTensor.device.device_id != targetDeviceId)
+                {
+                    throw py::value_error("DLPack tensor device_id does not match the VDB device subset.");
+                }
+
+                void* data = getDlpackDataPointer(dlTensor);
+                mi::Size sizeInBytes = getCompactSizeInBytes(dlTensor);
+
+                {
+                    py::gil_scoped_release g;
+                    if (!self->adopt_grid_buffer(index, data, sizeInBytes))
+                    {
+                        throw std::runtime_error("Failed to adopt DLPack tensor.");
+                    }
+                }
+
+                return makeAdoptionCapsule(adoption.release());
             },
-            "Adopt the field array.")
+            py::arg("index"), py::arg("tensor"), py::arg("stream") = py::none(),
+            "Adopt a compact CUDA DLPack tensor as the VDB grid buffer. The returned token keeps the DLPack export alive.")
         /**/;
     using nv::index::IData_subset_factory;
     py::class_<IData_subset_factory>(m, "IData_subset_factory")

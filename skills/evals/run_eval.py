@@ -113,8 +113,7 @@ def show_prompt(prompts, eval_key, harness=None, model=None):
         print(f"Harness/Model: {harness} / {model}")
         print(f"Render dir: {render_dir}")
     else:
-        print(f"Render dir (placeholder): {render_dir}  "
-              "— pass --harness and --model for the real path")
+        print(f"Render dir (placeholder): {render_dir}  " "— pass --harness and --model for the real path")
     print(f"{'='*70}")
     print(f"\n{prompt_text}")
     if outputs:
@@ -129,7 +128,7 @@ def run_validator(prompts, eval_key, harness, model):
     data = prompts[eval_key]
 
     if not data.get("graded", True):
-        print(f"Eval '{eval_key}' is not graded (creative eval). No validator to run.")
+        print(f"Eval '{eval_key}' is not graded (human review). No validator to run.")
         return None
 
     validator = data.get("validator")
@@ -147,9 +146,13 @@ def run_validator(prompts, eval_key, harness, model):
     os.makedirs(render_dir, exist_ok=True)
 
     cmd = [
-        os.path.join(REPO_ROOT, "repo.sh"), "launch",
-        "-n", kit_file, "--",
-        "--exec", validator_path,
+        os.path.join(REPO_ROOT, "repo.sh"),
+        "launch",
+        "-n",
+        kit_file,
+        "--",
+        "--exec",
+        validator_path,
         "--no-window",
         "--/app/asyncRendering=false",
         "--/rtx/materialDb/syncLoads=true",
@@ -163,11 +166,13 @@ def run_validator(prompts, eval_key, harness, model):
     ]
 
     if eval_key in ("02_volume_render", "04_multi_viz", "06_time_varying_video"):
-        cmd.extend([
-            '--/renderer/enabled=rtx',
-            '--/rtx/rendermode=RaytracedLighting',
-            '--/rtx/directLighting/sampledLighting/enabled=true',
-        ])
+        cmd.extend(
+            [
+                "--/renderer/enabled=rtx",
+                "--/rtx/rendermode=RaytracedLighting",
+                "--/rtx/directLighting/sampledLighting/enabled=true",
+            ]
+        )
 
     env = {**os.environ, "KIT_CAE_EVAL_RENDER_DIR": render_dir}
 
@@ -177,8 +182,7 @@ def run_validator(prompts, eval_key, harness, model):
 
     start_time = time.time()
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
-                                cwd=REPO_ROOT, env=env)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=REPO_ROOT, env=env)
         duration = time.time() - start_time
         output = result.stdout + result.stderr
 
@@ -198,8 +202,7 @@ def run_validator(prompts, eval_key, harness, model):
             eval_result["date"] = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
             print(f"{'='*50}")
-            print(f"Result: {'PASS' if eval_result['pass'] else 'FAIL'} — "
-                  f"Score: {eval_result['score']}/100")
+            print(f"Result: {'PASS' if eval_result['pass'] else 'FAIL'} — " f"Score: {eval_result['score']}/100")
             print(f"Duration: {duration:.1f}s")
             print(f"{'='*50}")
             for check in eval_result.get("checks", []):
@@ -343,10 +346,7 @@ def update_top_summary():
                 duration = e.get("duration_seconds")
                 dur_str = f"{duration:.1f}s" if isinstance(duration, (int, float)) else "—"
                 date_str = (e.get("date") or "")[:10]
-                lines.append(
-                    f"| {e.get('eval', '?')} | {status} | {e.get('score', 0)} | "
-                    f"{dur_str} | {date_str} |"
-                )
+                lines.append(f"| {e.get('eval', '?')} | {status} | {e.get('score', 0)} | " f"{dur_str} | {date_str} |")
             lines.append("")
 
     path = os.path.join(RESULTS_DIR, "SUMMARY.md")
@@ -367,9 +367,11 @@ def show_results():
     print(f"  {'─'*15} {'─'*20} {'─'*10} {'─'*10} {'─'*20}")
     for s in sorted(summaries, key=lambda x: (x.get("harness", ""), x.get("model", ""))):
         passed_str = f"{s.get('passed', 0)}/{s.get('total', 0)}"
-        print(f"  {s.get('harness', '?'):<15} {s.get('model', '?'):<20} "
-              f"{passed_str:<10} {s.get('avg_score', 0):<10} "
-              f"{(s.get('last_updated') or '')[:16]}")
+        print(
+            f"  {s.get('harness', '?'):<15} {s.get('model', '?'):<20} "
+            f"{passed_str:<10} {s.get('avg_score', 0):<10} "
+            f"{(s.get('last_updated') or '')[:16]}"
+        )
     print()
 
 
@@ -386,10 +388,15 @@ def main():
     parser.add_argument("--prompt", action="store_true", help="Show eval prompt")
     parser.add_argument("--validate", action="store_true", help="Run validator")
     parser.add_argument("--all", action="store_true", help="Run all graded evals")
-    parser.add_argument("--harness", type=str, default=None,
-                        help="Harness name (required for --validate; e.g. claude-code, openclaw, codex)")
-    parser.add_argument("--model", type=str, default=None,
-                        help="Model name (required for --validate; e.g. opus-4.7, codex-5.4)")
+    parser.add_argument(
+        "--harness",
+        type=str,
+        default=None,
+        help="Harness name (required for --validate; e.g. claude-code, openclaw, codex)",
+    )
+    parser.add_argument(
+        "--model", type=str, default=None, help="Model name (required for --validate; e.g. opus-4.7, codex-5.4)"
+    )
     parser.add_argument("--results", action="store_true", help="Show results summary")
 
     args = parser.parse_args()

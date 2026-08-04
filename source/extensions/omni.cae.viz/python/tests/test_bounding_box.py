@@ -13,10 +13,10 @@ import asyncio
 import carb.settings
 import numpy as np
 import omni.kit.test
-from omni.cae.data import usd_utils
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core import usd_utils
+from omni.cae.core.commands import execute_command
 from omni.cae.testing import get_test_data_path, new_stage, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.kit.app import get_app
 from pxr import Gf, Usd
 
@@ -29,14 +29,13 @@ class TestBoundingBox(omni.kit.test.AsyncTestCase):
             await import_to_stage(get_test_data_path("StaticMixer.cgns"), "/World/StaticMixer")
             base_path: str = "/World/StaticMixer/Base/StaticMixer"
 
-            dataset_names: list[str] = ["in1", "in2", "out", "B1_P3", "StaticMixer_Default", "GridCoordinates"]
+            dataset_names: list[str] = ["in1", "in2", "out", "B1_P3", "StaticMixer_Default"]
             expected_bds = {
                 "in1": Gf.Range3d((-1.5, -3, 0.5), (-0.5, -3.0, 1.5)),
                 "in2": Gf.Range3d(Gf.Vec3d(0.5, 3.0, 0.5), Gf.Vec3d(1.5, 3.0, 1.5)),
                 "out": Gf.Range3d(Gf.Vec3d(-0.5, -0.5, -2.0), Gf.Vec3d(0.5, 0.5, -2.0)),
                 "B1_P3": Gf.Range3d((-2, -3, -2), (2, 3, 2)),
                 "StaticMixer_Default": Gf.Range3d((-2, -3, -2), (2, 3, 2)),
-                "GridCoordinates": Gf.Range3d((-2, -3, -2), (2, 3, 2)),
             }
 
             for ds_name in dataset_names:
@@ -71,7 +70,7 @@ class TestBoundingBox(omni.kit.test.AsyncTestCase):
 
     async def test_bounding_box_use_point_bounds(self):
         """Test that when use_point_bounds setting is enabled, all datasets use point bounds for bounding box.
-        For StaticMixer, all bounding boxes should match GridCoordinates bounds since all datasets share the same points.
+        For StaticMixer, all bounding boxes should match the zone bounds since all datasets share the same points.
         """
         settings = carb.settings.get_settings()
         setting_path = "/persistent/exts/omni.cae.viz/defaultBoundingBoxUsePointBounds"
@@ -87,10 +86,10 @@ class TestBoundingBox(omni.kit.test.AsyncTestCase):
                 await import_to_stage(get_test_data_path("StaticMixer.cgns"), "/World/StaticMixer")
                 base_path: str = "/World/StaticMixer/Base/StaticMixer"
 
-                # Expected bounds: all datasets should have same bounds as GridCoordinates when using point bounds
+                # Expected bounds: all datasets should have same bounds as the zone when using point bounds
                 expected_bounds = Gf.Range3d((-2, -3, -2), (2, 3, 2))
 
-                dataset_names: list[str] = ["in1", "in2", "out", "B1_P3", "StaticMixer_Default", "GridCoordinates"]
+                dataset_names: list[str] = ["in1", "in2", "out", "B1_P3", "StaticMixer_Default"]
 
                 for ds_name in dataset_names:
                     dataset_path = f"{base_path}/{ds_name}"
@@ -103,7 +102,7 @@ class TestBoundingBox(omni.kit.test.AsyncTestCase):
                     self.assertIsNotNone(bbox, f"Bounding box for {ds_name} is None")
                     self.assertIsInstance(bbox, Gf.Range3d, f"Bounding box for {ds_name} is not a Gf.Range3d")
 
-                    # All datasets should have the same bounds as GridCoordinates when using point bounds
+                    # All datasets should have the same zone bounds when using point bounds
                     np.testing.assert_allclose(
                         [bbox.min[0], bbox.min[1], bbox.min[2]],
                         list(expected_bounds.min),

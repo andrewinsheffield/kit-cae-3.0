@@ -1,24 +1,28 @@
 """
 Eval 05 Validator: Streamlines
-Runs inside Kit-CAE via --exec. Imports NPZ, applies field association fix,
-creates streamlines with seed sphere, verifies velocity/color bindings, captures screenshot.
+Runs inside Kit-CAE via --exec. Imports NPZ as an OmniSci CGNS dataset, creates
+streamlines with a seed sphere, verifies field bindings, and captures a screenshot.
 """
+
 import asyncio
 import json
 import os
 
+import numpy as np
 import omni.kit.app
 import omni.usd
-from omni.cae.data.commands import execute_command
-from omni.cae.data import array_utils, usd_utils
-from omni.cae.schema import cae, viz as cae_viz
+from omni.cae.core import array_utils
+from omni.cae.core.commands import execute_command
+from omni.cae.schema import viz as cae_viz
 from omni.cae.testing import frame_prims, wait_for_update
-from omni.kit.viewport.utility import get_active_viewport, capture_viewport_to_file
+from omni.cae.usd_plugins_importers import import_to_stage
+from omni.kit.viewport.utility import capture_viewport_to_file, get_active_viewport
 from omni.usd import get_context
-from pxr import Gf, Tf, Usd, UsdGeom, UsdShade
+from pxr import Gf, Usd, UsdGeom, UsdShade
 
 RENDER_DIR = os.environ.get("KIT_CAE_EVAL_RENDER_DIR") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data", "renders")
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data", "renders"
+)
 os.makedirs(RENDER_DIR, exist_ok=True)
 OUTPUT_PATH = os.path.join(RENDER_DIR, "eval_05_streamlines.png")
 
@@ -27,12 +31,10 @@ async def main():
     app = omni.kit.app.get_app()
     checks = []
 
-    # 1. Import NPZ as SIDS Unstructured
+    # 1. Import NPZ using its CGNS interpretation.
     try:
-        from omni.cae.importer.npz import import_to_stage
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "data")
-        await import_to_stage(os.path.join(data_dir, "disk_out_ref.npz"), "/World/disk",
-                              schema_type="SIDS Unstructured")
+        await import_to_stage(os.path.join(data_dir, "disk_out_ref.npz"), "/World/disk", schema="CGNS")
         await wait_for_update(20)
         checks.append({"name": "import_success", "pass": True, "detail": "Imported"})
     except Exception as e:
@@ -43,52 +45,9 @@ async def main():
 
     stage = get_context().get_stage()
 
-    # 2. Field association fix
-    try:
-        array_base = stage.GetPrimAtPath("/World/disk/NumPyArrays")
-        fix_count = 0
-        if array_base and array_base.IsValid():
-            for child in array_base.GetAllChildren():
-                cae.FieldArray(child).CreateFieldAssociationAttr().Set(cae.Tokens.vertex)
-                fix_count += 1
-        await wait_for_update(10)
-        checks.append({"name": "field_assoc_fix", "pass": fix_count > 0,
-                        "detail": f"Fixed {fix_count} fields"})
-    except Exception as e:
-        checks.append({"name": "field_assoc_fix", "pass": False, "detail": str(e)})
-
-    # 3. Discover field paths dynamically
-    import usdrt
-    fabric_stage = usdrt.Usd.Stage.Attach(omni.usd.get_context().get_stage_id())
-    field_type = Tf.Type.Find(cae.FieldArray)
-    all_fields = [p.GetString() for p in fabric_stage.GetPrimsWithTypeName(field_type.typeName)]
-    disk_fields = [f for f in all_fields if f.startswith("/World/disk/NumPyArrays/")]
-
-    # Find velocity field
-    v_field = None
-    for f in disk_fields:
-        name = f.split("/")[-1]
-        if name.lower() in ("v", "velocity", "vel"):
-            v_field = f
-            break
-
-    # Find temperature field (for coloring)
-    t_field = None
-    for f in disk_fields:
-        name = f.split("/")[-1]
-        if name.lower() in ("temp", "t", "temperature"):
-            t_field = f
-            break
-
-    if not t_field:
-        t_field = disk_fields[0] if disk_fields else None
-    if not v_field:
-        v_field = disk_fields[1] if len(disk_fields) > 1 else t_field
-
-    print(f"Fields: t_field={t_field}, v_field={v_field}")
-
-    # 4. Create streamlines + seed
-    dataset_path = "/World/disk/NumPyDataSet"
+    # 2. Create streamlines + seed.
+    dataset_path = "/World/disk/Base/Zone/Section"
+    dataset_prim = stage.GetPrimAtPath(dataset_path)
     bbox_path = "/World/CAE/BoundingBox"
     stream_path = "/World/CAE/Streamlines"
     seed_path = "/World/CAE/Seed"
@@ -96,8 +55,9 @@ async def main():
     try:
         await execute_command("CreateCaeVizBoundingBox", dataset_paths=[dataset_path], prim_path=bbox_path)
 
-        await execute_command("CreateCaeVizStreamlines", dataset_path=dataset_path,
-                              prim_path=stream_path, type="standard")
+        await execute_command(
+            "CreateCaeVizStreamlines", dataset_path=dataset_path, prim_path=stream_path, type="standard"
+        )
         await execute_command("CreateCaeVizMeshPrim", prim_type="UnitSphere", prim_path=seed_path)
         await execute_command("TransformPrimSRT", path=seed_path, new_scale=[0.2, 0.2, 0.2])
 
@@ -105,10 +65,8 @@ async def main():
         stream_prim = stage.GetPrimAtPath(stream_path)
         cae_viz.StreamlinesAPI(stream_prim).GetDirectionAttr().Set(cae_viz.Tokens.forward)
         cae_viz.DatasetSelectionAPI(stream_prim, "seeds").GetTargetRel().SetTargets([seed_path])
-        if v_field:
-            cae_viz.FieldSelectionAPI(stream_prim, "velocities").GetTargetRel().SetTargets([v_field])
-        if t_field:
-            cae_viz.FieldSelectionAPI(stream_prim, "colors").CreateTargetRel().SetTargets([t_field])
+        cae_viz.FieldSelectionAPI(stream_prim, "velocities").CreateFieldNamesAttr().Set(["V"])
+        cae_viz.FieldSelectionAPI(stream_prim, "colors").CreateFieldNamesAttr().Set(["Temp"])
 
         # Wait for controller to process field bindings and auto-rescale
         await wait_for_update(120)
@@ -122,11 +80,12 @@ async def main():
 
             if ec and not ec.Get():
                 ec.Set(True)
-            if dm and t_field:
+            if dm:
                 dval = dm.Get()
                 if dval and dval[1] < dval[0]:
-                    t_prim = stage.GetPrimAtPath(t_field)
-                    farray = await usd_utils.get_array(t_prim, Usd.TimeCode.EarliestTime())
+                    attr = dataset_prim.GetAttribute("omni:sci:array:Temp:value")
+                    value = await asyncio.to_thread(attr.Get, Usd.TimeCode.EarliestTime())
+                    farray = np.asarray(value)
                     ranges = array_utils.get_componentwise_ranges(farray)
                     if ranges:
                         fmin, fmax = float(ranges[0][0]), float(ranges[0][1])
@@ -150,24 +109,23 @@ async def main():
 
     # 7. Verify velocity binding
     if prim_exists:
-        vel_targets = cae_viz.FieldSelectionAPI(stream_prim, "velocities").GetTargetRel().GetTargets()
-        vel_bound = len(vel_targets) > 0
-        checks.append({"name": "velocity_bound", "pass": vel_bound,
-                        "detail": str(vel_targets[0]) if vel_targets else "No targets"})
+        vel_names = cae_viz.FieldSelectionAPI(stream_prim, "velocities").GetFieldNamesAttr().Get() or []
+        vel_bound = "V" in vel_names
+        checks.append({"name": "velocity_bound", "pass": vel_bound, "detail": str(vel_names)})
 
     # 8. Verify color binding
     if prim_exists:
-        color_targets = cae_viz.FieldSelectionAPI(stream_prim, "colors").GetTargetRel().GetTargets()
-        color_bound = len(color_targets) > 0
-        checks.append({"name": "color_bound", "pass": color_bound,
-                        "detail": str(color_targets[0]) if color_targets else "No targets"})
+        color_names = cae_viz.FieldSelectionAPI(stream_prim, "colors").GetFieldNamesAttr().Get() or []
+        color_bound = "Temp" in color_names
+        checks.append({"name": "color_bound", "pass": color_bound, "detail": str(color_names)})
 
     # 9. Verify seed binding
     if prim_exists:
         seed_targets = cae_viz.DatasetSelectionAPI(stream_prim, "seeds").GetTargetRel().GetTargets()
         seed_bound = len(seed_targets) > 0
-        checks.append({"name": "seed_bound", "pass": seed_bound,
-                        "detail": str(seed_targets[0]) if seed_targets else "No targets"})
+        checks.append(
+            {"name": "seed_bound", "pass": seed_bound, "detail": str(seed_targets[0]) if seed_targets else "No targets"}
+        )
 
     # 10. Capture screenshot
     try:
@@ -183,8 +141,13 @@ async def main():
 
         file_exists = os.path.isfile(OUTPUT_PATH)
         file_size = os.path.getsize(OUTPUT_PATH) if file_exists else 0
-        checks.append({"name": "screenshot_exists", "pass": file_exists and file_size > 10000,
-                        "detail": f"{OUTPUT_PATH} ({file_size} bytes)"})
+        checks.append(
+            {
+                "name": "screenshot_exists",
+                "pass": file_exists and file_size > 10000,
+                "detail": f"{OUTPUT_PATH} ({file_size} bytes)",
+            }
+        )
     except Exception as e:
         checks.append({"name": "screenshot_exists", "pass": False, "detail": str(e)})
 
@@ -210,6 +173,7 @@ def _shutdown(app):
         for _ in range(10):
             await app.next_update_async()
         os._exit(0)
+
     asyncio.ensure_future(_do_shutdown())
 
 

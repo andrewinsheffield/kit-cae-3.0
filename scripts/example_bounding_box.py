@@ -10,10 +10,11 @@
 
 import asyncio
 
-from omni.cae.data.commands import execute_command
-from omni.cae.importer.cgns import import_to_stage
+from omni.cae.core.commands import execute_command
 from omni.cae.testing import frame_prims, get_test_data_path, wait_for_update
+from omni.cae.usd_plugins_importers import import_to_stage
 from omni.usd import get_context
+from pxr import UsdGeom
 
 # Usage:
 # Copy paste this script into the Script Editor (Developer > Script Editor) or execute it on launch w/
@@ -30,9 +31,12 @@ async def main():
     # Base path for the imported dataset
     base_path = "/World/StaticMixer/Base/StaticMixer"
 
-    # 1. Generate the bounding box for GridCoordinates
-    dataset_path: str = f"{base_path}/GridCoordinates"
-    viz_path = "/World/CAE/BoundingBox_GridCoordinates"
+    # create CAE anchor
+    UsdGeom.Xform.Define(ctx.get_stage(), "/World/CAE")
+
+    # 1. Generate the bounding box for B1_P3
+    dataset_path: str = f"{base_path}/B1_P3"
+    viz_path = "/World/CAE/BoundingBox_B1_P3"
     await execute_command("CreateCaeVizBoundingBox", dataset_paths=[dataset_path], prim_path=viz_path)
     await wait_for_update()
 
