@@ -650,14 +650,27 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         """Create GLYPH_NUM_PROTOTYPES Xform prototypes, each with a constant grayscale
         primvars:displayColor of (i/(N-1),)*3. Returned in order; the caller wires
         them into the PointInstancer's `prototypes` relationship and the Glyphs
-        operator writes `protoIndices` per-instance to select among them."""
+        operator writes `protoIndices` per-instance to select among them.
+
+        The shape geometry is authored once under a shared ``class`` prim
+        ``GeomMaster`` and each of the N Xforms internally references it. This
+        keeps the on-disk hierarchy compact — critical for the ``Custom`` shape,
+        where the template can be a large scope (e.g. an EDEM ``GeometryGroups``)
+        that must not be duplicated N times."""
         stage = protosPrim.GetStage()
         n = GLYPH_NUM_PROTOTYPES
         denom = max(n - 1, 1)
+
+        # Class prims are excluded from render traversal but still compose into
+        # referencing prims, so the master geometry never renders at world origin.
+        master_path = protosPrim.GetPath().AppendChild("GeomMaster")
+        stage.CreateClassPrim(master_path)
+        self._author_prototype_geometry(stage, master_path)
+
         paths: list[Sdf.Path] = []
         for i in range(n):
             xform = UsdGeom.Xform.Define(stage, protosPrim.GetPath().AppendChild(f"Xform_{i:02d}"))
-            self._author_prototype_geometry(xform)
+            xform.GetPrim().GetReferences().AddInternalReference(master_path)
             pv_api = UsdGeom.PrimvarsAPI(xform.GetPrim())
             pv = pv_api.CreatePrimvar(
                 "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant
@@ -667,23 +680,22 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
             paths.append(xform.GetPath())
         return paths
 
-    def _author_prototype_geometry(self, xform: UsdGeom.Xform) -> None:
-        stage = xform.GetPrim().GetStage()
+    def _author_prototype_geometry(self, stage: Usd.Stage, parent_path: Sdf.Path) -> None:
         if self._shape == "Sphere":
-            sphere = UsdGeom.Sphere.Define(stage, xform.GetPath().AppendChild("Sphere"))
+            sphere = UsdGeom.Sphere.Define(stage, parent_path.AppendChild("Sphere"))
             sphere.CreateRadiusAttr().Set(0.5)
         elif self._shape == "Cone":
-            cone = UsdGeom.Cone.Define(stage, xform.GetPath().AppendChild("Cone"))
+            cone = UsdGeom.Cone.Define(stage, parent_path.AppendChild("Cone"))
             cone.CreateHeightAttr().Set(1.0)
             cone.CreateRadiusAttr().Set(0.5)
             cone.CreateAxisAttr().Set(UsdGeom.Tokens.x)
         elif self._shape == "Arrow":
-            arrowCylinder = UsdGeom.Cylinder.Define(stage, xform.GetPath().AppendChild("Cylinder"))
+            arrowCylinder = UsdGeom.Cylinder.Define(stage, parent_path.AppendChild("Cylinder"))
             arrowCylinder.CreateHeightAttr().Set(0.5)
             arrowCylinder.CreateRadiusAttr().Set(0.15)
             arrowCylinder.CreateAxisAttr().Set(UsdGeom.Tokens.x)
             arrowCylinder.AddTranslateOp().Set((0.25, 0, 0))
-            arrowCone = UsdGeom.Cone.Define(stage, xform.GetPath().AppendChild("Cone"))
+            arrowCone = UsdGeom.Cone.Define(stage, parent_path.AppendChild("Cone"))
             arrowCone.CreateHeightAttr().Set(0.5)
             arrowCone.CreateRadiusAttr().Set(0.3)
             arrowCone.CreateAxisAttr().Set(UsdGeom.Tokens.x)
@@ -696,7 +708,7 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
                 raise RuntimeError(
                     f"Custom prototype template prim at path {self._custom_prototype_template} not found"
                 )
-            ref_prim = stage.DefinePrim(xform.GetPath().AppendChild(template_prim.GetName()))
+            ref_prim = stage.DefinePrim(parent_path.AppendChild(template_prim.GetName()))
             ref_prim.GetReferences().AddInternalReference(template_prim.GetPath())
         else:
             raise RuntimeError(f"Unsupported shape: {self._shape}")
