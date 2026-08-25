@@ -1,41 +1,42 @@
-# Changes made by Andrew Hobbs (ahobbs@astecindustries.com) June 23, 2026 with assistance by
+# Changes made by Andrew Hobbs (ahobbs@astecindustries.com) August 25, 2026 with assistance by
+
 # Claude
 
 # Glyph (PointInstancer) Per-Instance Coloring — Implementation Notes
 
-This document summarises the changes made to implement correct per-instance coloring for
-the **Glyphs** (`CaeVizGlyphsAPI`) operator, including the root-cause analysis that drove
-the design, and the final architecture used.
+This document describes the per-instance coloring implementation for the **Glyphs**
+(`CaeVizGlyphsAPI`) operator, including the root-cause analysis that drove the design and
+the final architecture.
 
 ---
 
 ## Background — Why Per-Instance Primvars Don't Work
 
 `UsdGeom.PointInstancer` supports per-instance primvars (e.g. `primvars:colors`,
-`primvars:displayColor`) on the instancer itself.  However, empirical testing with the
+`primvars:displayColor`) on the instancer itself. However, empirical testing with the
 NVIDIA RTX renderer in Kit confirmed that **the renderer does not forward per-instance
-PointInstancer primvars into the prototype's MDL shader context**.  Regardless of the
-primvar name, type, or how it is written (USD session layer, USDRT/Fabric), the
-prototype shader only sees its own constant primvars — never the per-instance values on
-the PointInstancer.
+PointInstancer primvars into the prototype's MDL shader context**. Regardless of the
+primvar name, type, or how it is written (USD session layer, USDRT/Fabric), the prototype
+shader only sees its own constant primvars — never the per-instance values on the
+PointInstancer.
 
-This rules out the approach used by the Points/Mesh operators (writing a per-vertex
+This rules out the approach used by the Points operator (writing a per-vertex
 `primvars:colors` array and letting the MDL shader read it via
 `scene::data_lookup_float("colors", ...)`).
 
 ---
 
-## Solution — Multi-Prototype Binning
+## Solution — Multi-Prototype Binning with a Shared Master
 
 The canonical USD mechanism for per-instance variation on a `PointInstancer` is
-`protoIndices`: each prototype can be a distinct prim with different constant properties,
-and the instancer selects one prototype per instance.
+`protoIndices`: each prototype is a distinct prim with different constant properties, and
+the instancer selects one prototype per instance.
 
 ### Architecture
 
-**N = 32 prototype Xforms** are created under `Prototypes/` when the Glyphs operator is
-first built (`CreateCaeVizGlyphs` command).  Each prototype carries a constant
-`primvars:displayColor` that encodes a **grayscale scalar**:
+**N = 32 prototype Xforms** (`GLYPH_NUM_PROTOTYPES`) are created under `Prototypes/` when
+the Glyphs operator is first built (`CreateCaeVizGlyphs` command). Each prototype carries
+a constant `primvars:displayColor` that encodes a **grayscale scalar**:
 
 ```
 prototype i  →  displayColor = (i/(N-1),  i/(N-1),  i/(N-1))
@@ -43,16 +44,39 @@ prototype i  →  displayColor = (i/(N-1),  i/(N-1),  i/(N-1))
 
 Prototype 0 → `(0, 0, 0)` (black), prototype 31 → `(1, 1, 1)` (white).
 
+To avoid duplicating the shape geometry N times — critical for the `Custom` shape, whose
+template can be an arbitrarily large scope such as an EDEM `GeometryGroups` hierarchy —
+the shape is authored **once** under a shared `class` prim `Prototypes/GeomMaster`, and
+each of the 32 prototype Xforms internally references it:
+
+```
+PointInstancer
+  Prototypes (over)
+    GeomMaster (class)          ← shape authored once
+      Sphere / Cone / Arrow / <Custom template reference>
+    Xform_00 (def, references GeomMaster)
+      primvars:displayColor = (0/31,  0/31,  0/31)
+    Xform_01 (def, references GeomMaster)
+      primvars:displayColor = (1/31,  1/31,  1/31)
+    ...
+    Xform_31 (def, references GeomMaster)
+      primvars:displayColor = (31/31, 31/31, 31/31)
+```
+
+Why `class`? Class prims are excluded from render traversal but still compose normally
+through `AddInternalReference`, so `GeomMaster` never renders at world origin while its
+descendants appear correctly beneath each `Xform_i` via composition.
+
 At operator execution time (`write_glyph_display_color`), each instance is assigned to a
 prototype bin based on its normalised field value:
 
 ```python
-normalised  = clamp((field[i] - domain_min) / (domain_max - domain_min), 0, 1)
-proto_index = clamp(floor(normalised * N), 0, N-1)
+normalised  = clip((field[i] - domain_min) / (domain_max - domain_min), 0, 1)
+proto_index = clip(floor(normalised * N), 0, N-1)
 ```
 
-The `protoIndices` array is written via **USDRT/Fabric only** (not USD session layer) to
-avoid conflicting with the Fabric state maintained for positions, scales, and
+The `protoIndices` array is written via **USDRT/Fabric only** (not the USD session layer)
+to avoid conflicting with the Fabric state maintained for positions, scales, and
 orientations.
 
 The MDL **ScalarColor** shader (`basic.mdl`, `use_vertex_color = true`) then:
@@ -66,8 +90,8 @@ The MDL **ScalarColor** shader (`basic.mdl`, `use_vertex_color = true`) then:
 This makes **LUT changes update automatically at render time** — the MDL shader
 re-evaluates the texture lookup with no Python recomputation needed.
 
-**Domain changes** require recomputing `protoIndices` (step above), which requires
-operator re-execution (see Controller section below).
+**Domain changes** require recomputing `protoIndices`, which requires operator
+re-execution (see Controller section below).
 
 ---
 
@@ -75,25 +99,23 @@ operator re-execution (see Controller section below).
 
 ### `source/extensions/omni.cae.viz/material_library/cae/mdl/basic.mdl`
 
-**ScalarColor material — `use_vertex_color` path rewritten.**
+**`ScalarColor` material — added `use_vertex_color` and rewrote the coloring let-block.**
 
-Previously when `use_vertex_color = true` the shader read `displayColor` and output it
-directly as the surface tint, bypassing the LUT entirely.
-
-New behaviour:
+New signature adds a uniform bool `use_vertex_color = false`. The let-block:
 
 ```mdl
-float proto_scalar = math::luminance(scene::data_lookup_color("displayColor", color(0.0f)));
-float field_scalar = use_coloring ?
-    (scene::data_lookup_float("colors", 0.0f) - domain.x) / (domain.y - domain.x) : 1.0f;
+bool use_coloring    = (domain.x < domain.y) && enable_coloring;
+float field          = scene::data_lookup_float("colors", 0.0f);
+float field_norm     = use_coloring ? (field - domain.x) / (domain.y - domain.x) : 1.0f;
+float proto_scalar   = math::luminance(scene::data_lookup_color("displayColor", color(0.0f)));
+float lut_t          = use_vertex_color ? proto_scalar : field_norm;
+bool  lut_active     = use_vertex_color || use_coloring;
 
-float lut_t = use_vertex_color ? proto_scalar : field_scalar;
-
-color final_color = tex::texture_isvalid(lut) && (use_vertex_color || use_coloring) ?
+color final_color = tex::texture_isvalid(lut) && lut_active ?
     tex::lookup_color(lut, float2(lut_t, 0.0f), tex::wrap_clamp, tex::wrap_clamp) : color(lut_t);
 ```
 
-Both the glyph path (`use_vertex_color = true`) and the standard scalar path
+Both the glyph path (`use_vertex_color = true`) and the standard per-vertex scalar path
 (`use_vertex_color = false`, `enable_coloring = true`) now go through the same
 `tex::lookup_color` call.
 
@@ -101,60 +123,76 @@ Both the glyph path (`use_vertex_color = true`) and the standard scalar path
 
 ### `source/extensions/omni.cae.viz/python/create_commands.py`
 
-**Prototype display colors changed from rainbow to grayscale encoding.**
+**Added `GLYPH_NUM_PROTOTYPES = 32` module constant** with a block comment explaining the
+per-instance-primvar limitation and the multi-prototype workaround.
 
-`_sample_rainbow_colors` (which produced actual RGB colors by sampling the LUT at
-creation time) was removed.  The `_create_prototypes` loop now computes inline:
+**`CreateCaeVizGlyphs.do()`** now wires the `prototypes` relationship to the list returned
+by `_create_prototypes` and sets `use_vertex_color = True` on the bound shader:
 
 ```python
-n = GLYPH_NUM_PROTOTYPES
-colors = [Gf.Vec3f(i / max(n - 1, 1), i / max(n - 1, 1), i / max(n - 1, 1)) for i in range(n)]
+primT.CreatePrototypesRel().SetTargets(self._create_prototypes(protosPrim))
+...
+shader.CreateInput("use_vertex_color", Sdf.ValueTypeNames.Bool).Set(True)
 ```
 
-These fixed grayscale scalars are written once at operator creation time and never need
-to be updated — the MDL shader handles the colour mapping at render time.
+**New `_create_prototypes(protosPrim)`** authors the shape geometry once under a
+`class`-spec `GeomMaster` prim (via `stage.CreateClassPrim`) and creates N Xforms, each
+internally referencing `GeomMaster` and carrying its own constant grayscale
+`primvars:displayColor`.
 
-The block comment on `GLYPH_NUM_PROTOTYPES` and `_create_prototypes` was updated to
-document the new design.
+**`_author_prototype_geometry` refactored** to accept `(stage, parent_path)` so the same
+shape-authoring logic can target the class-prim master. The `Sphere`, `Cone`, `Arrow`,
+and `Custom` shape branches are otherwise unchanged.
+
+The previous single-prototype `_create_prototype` helper is removed.
 
 ---
 
 ### `source/extensions/omni.cae.viz/python/utils.py`
 
-**LUT sampling helpers removed; `write_glyph_display_color` simplified.**
+**New public function `write_glyph_display_color(prim, dataset)`** (added to `__all__`).
 
-Three helper functions that were introduced to sample the LUT PNG and update prototype
-display colors at Python level are no longer needed and were removed:
+Responsibilities:
 
-- `_resolve_lut_asset_path`
-- `_sample_lut_image`
-- `_update_prototype_display_colors`
+1. Early-return if the prim is not a `PointInstancer` or the dataset has no `colors`
+   field.
+2. Validate the multi-prototype layout: if fewer than 2 prototype targets are wired up,
+   log a warning telling the user to re-create the operator and return.
+3. Resolve the bound MDL shader (via `UsdShade.MaterialBindingAPI.ComputeBoundMaterial()`
+   and `ComputeSurfaceSource("mdl")`) and read `enable_coloring` and `domain`.
+4. Self-heal: ensure `inputs:use_vertex_color = True` on the shader (covers operators
+   authored before this input existed).
+5. If coloring is disabled or the domain is degenerate (`dmin >= dmax`), write all-zero
+   `protoIndices` (routes every instance to prototype 0).
+6. Fetch the `colors` field, magnitude-reduce vector fields (matching the semantics of
+   `RescaleRangeAPI.get_range()` for vectors), compute the normalised bin index array,
+   and write `protoIndices` via USDRT/Fabric.
 
-`write_glyph_display_color` was simplified to:
+The LUT lookup is entirely MDL-side; Python only needs to write `protoIndices`.
 
-1. Early-return if the prim is not a `PointInstancer` or has no `colors` field.
-2. Validate the multi-prototype layout (warns and returns if `num_protos < 2`, directing
-   the user to re-create the operator).
-3. Resolve the bound MDL shader and read `enable_coloring` / `domain`.
-4. Self-heal: ensure `use_vertex_color = True` on the shader (covers operators created
-   before this fix).
-5. If coloring is disabled or the domain is degenerate, write all-zero `protoIndices`
-   (routes all instances to prototype 0).
-6. Fetch the `colors` field, reduce vector fields to magnitude (matching
-   `RescaleRangeAPI`), compute normalised bin indices, and write `protoIndices` via
-   USDRT/Fabric.
+---
 
-The LUT lookup is now entirely MDL-side; Python only needs to write `protoIndices`.
+### `source/extensions/omni.cae.viz/python/points.py`
+
+**`Glyphs.populate_glyphs`** invokes the new helper after the standard field-selection
+processing:
+
+```python
+viz_utils.process_field_selection_apis(prim, points_dataset, exclude_fields={"scales", "orientations"})
+viz_utils.write_glyph_display_color(prim, points_dataset)
+```
+
+No other changes to `points.py`.
 
 ---
 
 ### `source/extensions/omni.cae.viz/python/controller.py`
 
-**Import additions and glyph shader change detection.**
+**Added shader-domain / LUT change detection for Glyphs prims.**
 
 #### Imports
 
-`UsdShade` and `Gf` added to the `from pxr import ...` line (needed by the new methods).
+`UsdShade` added to the `from pxr import ...` line.
 
 #### `_last_execution_cache` initialisation
 
@@ -165,7 +203,7 @@ Two new keys added to the per-prim cache entry:
 "glyph_shader_lut": None,      # last-seen LUT asset path string
 ```
 
-#### Cache update in `_execute_operator` `finally` block
+#### Cache update in the `_execute_operator` `finally` block
 
 After each execution context, `_read_glyph_shader_state(prim)` is called and its result
 is stored in the cache so the next sync can compare.
@@ -180,22 +218,21 @@ structural_change = structural_change or self._has_glyph_shader_changed(prim, la
 
 #### New method: `_read_glyph_shader_state(prim)`
 
-Reads `inputs:domain` and `inputs:lut` from the MDL shader bound to a
-`PointInstancer` prim.  Returns `(None, None)` for non-PointInstancer prims or if no
-bound shader is found.  Exceptions are silently caught so it never raises during the
-sync loop.
+Reads `inputs:domain` and `inputs:lut` from the MDL shader bound to a `PointInstancer`
+prim. Returns `(None, None)` for non-PointInstancer prims or when no bound shader is
+found. Exceptions are silently caught so it never raises during the sync loop.
 
 #### New method: `_has_glyph_shader_changed(prim, last_execution)`
 
-Compares the current shader domain and LUT against the values stored in
-`last_execution`.  Returns `True` (and updates the cache) when either value has
-changed.  This causes the controller to force operator re-execution, which recomputes
-`protoIndices` against the new domain.
+Compares the current shader domain and LUT against the values stored in `last_execution`.
+Returns `True` (and updates the cache) when either value has changed. This causes the
+controller to force operator re-execution, which recomputes `protoIndices` against the
+new domain.
 
-**Why this is necessary:** The bound material's shader prim does not carry any `^Cae`
-schema, so the `ChangeTracker` (which only monitors operator-prim property changes) does
-not see edits to `inputs:domain` or `inputs:lut`.  Without this check, adjusting the
-domain in the property panel had no visible effect on glyph colours.
+**Why this is necessary:** The bound material's shader prim carries no `Cae` schema, so
+the `ChangeTracker` (which only monitors operator-prim property changes) does not see
+edits to `inputs:domain` or `inputs:lut`. Without this check, adjusting the domain in the
+property panel would have no visible effect on glyph colours.
 
 ---
 
@@ -213,8 +250,8 @@ populate_glyphs()
   ├─ writes positions / scales / orientations via USDRT
   └─ calls write_glyph_display_color()
        ├─ reads domain from shader
-       ├─ normalises field values: t = (v - min) / (max - min)
-       ├─ bins: proto_index = floor(t * N)   (clamped to [0, N-1])
+       ├─ normalises field values: t = clip((v - min) / (max - min), 0, 1)
+       ├─ bins: proto_index = clip(floor(t * N), 0, N-1)
        └─ writes protoIndices via USDRT
 
                 RTX render loop
@@ -222,15 +259,18 @@ populate_glyphs()
                       ▼
         For each glyph instance i:
           prototype = Xform_{proto_index[i]}
-          displayColor = (proto_index[i]/(N-1), ...)   ← grayscale scalar
-          MDL ScalarColor shader:
+          displayColor = (proto_index[i]/(N-1), ...)     ← grayscale scalar
+          Xform composes GeomMaster's geometry via internal reference
+          MDL ScalarColor shader (use_vertex_color = true):
             scalar = math::luminance(displayColor)
-            color  = LUT.sample(scalar)                ← current LUT texture
+            color  = LUT.sample(scalar)                  ← current LUT texture
 ```
 
-When the **LUT PNG is changed**: the MDL shader automatically re-evaluates at the next
-render frame with no operator re-execution required.
-
-When the **domain is changed**: the controller's `_has_glyph_shader_changed` check fires
-on the next sync, triggering operator re-execution, which recomputes `protoIndices` for
-the new range.
+- **LUT PNG change** → MDL shader re-samples automatically on the next render frame; no
+  operator re-execution required.
+- **Domain change** → `_has_glyph_shader_changed` fires on the next sync, forcing
+  operator re-execution, which recomputes `protoIndices` for the new range.
+- **Number of bins** is controlled by `GLYPH_NUM_PROTOTYPES` at operator-creation time.
+  N = 32 gives ~5-bit scalar quantization; increasing N reduces banding at the cost of
+  extra USD prims at creation time (runtime cost per instance is unchanged, and the shape
+  geometry is authored only once regardless of N).
