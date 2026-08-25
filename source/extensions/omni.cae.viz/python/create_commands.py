@@ -31,6 +31,17 @@ from . import settings
 
 logger = getLogger(__name__)
 
+# Number of grayscale prototype Xforms authored under a Glyphs PointInstancer.
+# Per-instance primvars on a PointInstancer are not forwarded into the prototype's
+# MDL shader context, so per-instance color must be encoded via `protoIndices`
+# selecting among N prototypes, each carrying a distinct constant primvar the
+# prototype's own shader can read. Each prototype authors
+# ``primvars:displayColor = (g,g,g)`` with g = i/(N-1); the MDL ScalarColor
+# shader extracts the scalar with luminance() and does the LUT lookup at render
+# time. Larger N reduces color banding at the cost of extra USD prims at
+# operator-creation time (runtime cost per instance is unchanged).
+GLYPH_NUM_PROTOTYPES = 32
+
 
 def create_material(mtl_name: str, stage: Usd.Stage, path: Sdf.Path) -> Usd.Prim:
     omni.kit.commands.execute(
@@ -570,7 +581,7 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         # create prototypes under an "over" prim to skip the prototypes in standard stage navigation
         # refer to OpenUSD documentation for PointInstancer for more details.
         protosPrim = stage.OverridePrim(primT.GetPath().AppendChild("Prototypes"))
-        primT.CreatePrototypesRel().SetTargets([self._create_prototype(protosPrim).GetPath()])
+        primT.CreatePrototypesRel().SetTargets(self._create_prototypes(protosPrim))
 
         prim = primT.GetPrim()
         cae_viz.OperatorAPI.Apply(prim)
@@ -604,6 +615,9 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
             attr.Set(False)
             cae_viz.RescaleRangeAPI(prim, "colors").CreateEnableIncludesRel().AddTarget(attr.GetAttr().GetPath())
 
+            # Route per-instance color through the multi-prototype displayColor path.
+            shader.CreateInput("use_vertex_color", Sdf.ValueTypeNames.Bool).Set(True)
+
         cae_viz.FieldSelectionAPI.Apply(prim, "scales")
         cae_viz.FieldSelectionAPI.Apply(prim, "orientations")
 
@@ -632,9 +646,29 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         logger.warning("selected prototype: %s", path)
         return path
 
-    def _create_prototype(self, protosPrim: Usd.Prim) -> Usd.Prim:
+    def _create_prototypes(self, protosPrim: Usd.Prim) -> list[Sdf.Path]:
+        """Create GLYPH_NUM_PROTOTYPES Xform prototypes, each with a constant grayscale
+        primvars:displayColor of (i/(N-1),)*3. Returned in order; the caller wires
+        them into the PointInstancer's `prototypes` relationship and the Glyphs
+        operator writes `protoIndices` per-instance to select among them."""
         stage = protosPrim.GetStage()
-        xform = UsdGeom.Xform.Define(stage, protosPrim.GetPath().AppendChild("Xform"))
+        n = GLYPH_NUM_PROTOTYPES
+        denom = max(n - 1, 1)
+        paths: list[Sdf.Path] = []
+        for i in range(n):
+            xform = UsdGeom.Xform.Define(stage, protosPrim.GetPath().AppendChild(f"Xform_{i:02d}"))
+            self._author_prototype_geometry(xform)
+            pv_api = UsdGeom.PrimvarsAPI(xform.GetPrim())
+            pv = pv_api.CreatePrimvar(
+                "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant
+            )
+            g = i / denom
+            pv.Set([Gf.Vec3f(g, g, g)])
+            paths.append(xform.GetPath())
+        return paths
+
+    def _author_prototype_geometry(self, xform: UsdGeom.Xform) -> None:
+        stage = xform.GetPrim().GetStage()
         if self._shape == "Sphere":
             sphere = UsdGeom.Sphere.Define(stage, xform.GetPath().AppendChild("Sphere"))
             sphere.CreateRadiusAttr().Set(0.5)
@@ -666,7 +700,6 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
             ref_prim.GetReferences().AddInternalReference(template_prim.GetPath())
         else:
             raise RuntimeError(f"Unsupported shape: {self._shape}")
-        return xform
 
 
 class CreateCaeVizVolume(omni.kit.commands.Command):

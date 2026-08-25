@@ -34,7 +34,7 @@ import omni.usd
 import warp_simdata as simdata
 from omni.cae.core import progress, usd_utils
 from omni.cae.schema import viz as cae_viz
-from pxr import Usd, UsdGeom, UsdUtils
+from pxr import Usd, UsdGeom, UsdShade, UsdUtils
 from usdrt import Rt
 from usdrt import Usd as UsdRT
 from usdrt import UsdGeom as UsdGeomRT
@@ -332,6 +332,8 @@ class Controller:
                 "device": None,
                 "operator_class": None,
                 "temporal_state": None,
+                "glyph_shader_domain": None,
+                "glyph_shader_lut": None,
             }
 
         last_execution = self._last_execution_cache[prim_path_str]
@@ -446,12 +448,15 @@ class Controller:
 
                 finally:
                     # Update cache after each context (successful or not)
+                    glyph_domain, glyph_lut = self._read_glyph_shader_state(prim)
                     self._last_execution_cache[prim_path_str] = {
                         "timecode": execution_context.timecode,
                         "raw_timecode": execution_context.raw_timecode,  # Track raw timecode for interpolation
                         "device": device,
                         "operator_class": operator_class,
                         "temporal_state": last_execution["temporal_state"],  # Preserve temporal state
+                        "glyph_shader_domain": glyph_domain,
+                        "glyph_shader_lut": glyph_lut,
                     }
         finally:
             omni.kit.app.queue_event(EVT_OPERATOR_END, _operator_event_payload())
@@ -552,6 +557,7 @@ class Controller:
         transform_changed = self._has_transform_dependency_changed(prim)
         tracker_changed = self._tracker.prim_changed(prim)
         structural_change = operator_changed or device_changed or transform_changed or tracker_changed
+        structural_change = structural_change or self._has_glyph_shader_changed(prim, last_execution)
 
         supports_temporal = getattr(operator_class, "__supports_temporal__", False)
 
@@ -786,3 +792,49 @@ class Controller:
                     if self._xform_change_tracker.AttributeChanged(str(attr_path)):
                         return True
         return False
+
+    def _read_glyph_shader_state(self, prim: Usd.Prim) -> tuple[Any, Any]:
+        """Read (domain, lut) from the MDL shader bound to a Glyphs PointInstancer.
+
+        The MDL shader prim carries no ``Cae`` schema, so ``ChangeTracker`` does
+        not see edits to its inputs. The controller polls the shader after each
+        exec and compares against the previous values to force a re-run when the
+        user tweaks the coloring domain (see ``_has_glyph_shader_changed``).
+        """
+        if not prim.IsA(UsdGeom.PointInstancer):
+            return (None, None)
+        try:
+            material = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()[0]
+            if not material:
+                return (None, None)
+            source = material.ComputeSurfaceSource("mdl")
+            shader = source[0] if source else None
+            if not shader:
+                return (None, None)
+            domain_input = shader.GetInput("domain")
+            lut_input = shader.GetInput("lut")
+            domain = domain_input.Get() if domain_input else None
+            lut = lut_input.Get() if lut_input else None
+            lut_path = lut.path if lut is not None and hasattr(lut, "path") else None
+            return (domain, lut_path)
+        except Exception:  # noqa: BLE001 -- sync must never raise
+            return (None, None)
+
+    def _has_glyph_shader_changed(self, prim: Usd.Prim, last_execution: dict) -> bool:
+        """True when the bound MDL shader's coloring domain or LUT differs from
+        the last-observed value. Updates the cache so the next call sees the new
+        baseline. Because ``inputs:domain`` and ``inputs:lut`` live on the
+        material's shader prim (no ``Cae`` schema), they escape the
+        ``ChangeTracker``; without this check, adjusting the domain in the
+        property panel has no visible effect on glyph colours."""
+        if not prim.IsA(UsdGeom.PointInstancer):
+            return False
+        domain, lut_path = self._read_glyph_shader_state(prim)
+        changed = (
+            last_execution.get("glyph_shader_domain") != domain
+            or last_execution.get("glyph_shader_lut") != lut_path
+        )
+        if changed:
+            last_execution["glyph_shader_domain"] = domain
+            last_execution["glyph_shader_lut"] = lut_path
+        return changed

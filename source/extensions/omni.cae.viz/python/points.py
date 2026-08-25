@@ -289,3 +289,4 @@ class Glyphs:
             prim_rt.CreateOrientationsAttr().Set([])
 
         viz_utils.process_field_selection_apis(prim, points_dataset, exclude_fields={"scales", "orientations"})
+        viz_utils.write_glyph_display_color(prim, points_dataset)

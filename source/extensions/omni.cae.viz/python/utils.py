@@ -62,6 +62,7 @@ __all__ = [
     "process_rescale_range_apis",
     "process_widths",
     "set_array_attribute",
+    "write_glyph_display_color",
 ]
 
 
@@ -1669,3 +1670,89 @@ def get_temporal_traits(prim: Usd.Prim, instance_name: str, attr_name: str) -> s
         raise ValueError(
             f"Unsupported attribute name '{attr_name}' for temporal traits. Supported attributes are 'topology' and 'geometry'."
         )
+
+
+def write_glyph_display_color(prim: Usd.Prim, dataset: simdata.Dataset) -> None:
+    """Assign each glyph instance to a prototype bin based on the ``colors`` field.
+
+    Per-instance color on a ``PointInstancer`` cannot be delivered via per-instance
+    primvars because the RTX renderer does not forward them into the prototype's
+    MDL shader context. Instead, the Glyphs operator authors N prototype Xforms
+    each carrying a constant grayscale ``primvars:displayColor = (i/(N-1),)*3``;
+    the bound MDL ScalarColor shader extracts the scalar via ``math::luminance``
+    and does the LUT lookup at render time. This function computes the
+    per-instance ``protoIndices`` array that selects the prototype bin from the
+    normalised field value.
+
+    LUT changes require no recomputation here (the shader re-samples at render
+    time). Domain and ``colors``-field value changes require recomputing the
+    bins, which happens on operator re-execution.
+
+    Silent no-ops:
+      * ``prim`` is not a ``PointInstancer``.
+      * The dataset has no ``colors`` field.
+      * Fewer than two prototypes are bound (operator predates the multi-proto
+        layout — logs a warning telling the user to recreate the operator).
+    """
+    if not prim.IsA(UsdGeom.PointInstancer):
+        return
+    if not dataset.has_field("colors"):
+        return
+
+    instancer = UsdGeom.PointInstancer(prim)
+    proto_targets = instancer.GetPrototypesRel().GetForwardedTargets()
+    num_protos = len(proto_targets)
+    if num_protos < 2:
+        logger.warning(
+            "Glyphs prim %s has %d prototype(s); per-instance coloring requires the "
+            "multi-prototype layout. Recreate the Glyphs operator to enable coloring.",
+            prim.GetPath(),
+            num_protos,
+        )
+        return
+
+    material_binding = UsdShade.MaterialBindingAPI(prim)
+    material = material_binding.ComputeBoundMaterial()[0]
+    shader = None
+    if material:
+        source = material.ComputeSurfaceSource("mdl")
+        shader = source[0] if source else None
+    if not shader:
+        return
+
+    enable_input = shader.GetInput("enable_coloring")
+    domain_input = shader.GetInput("domain")
+    enable_coloring = bool(enable_input.Get()) if enable_input else False
+    domain = domain_input.Get() if domain_input else None
+
+    # Self-heal: legacy operators created before use_vertex_color existed still
+    # need it toggled on to route through the multi-prototype path.
+    use_vertex_color_input = shader.GetInput("use_vertex_color") or shader.CreateInput(
+        "use_vertex_color", Sdf.ValueTypeNames.Bool
+    )
+    if use_vertex_color_input.Get() is not True:
+        use_vertex_color_input.Set(True)
+
+    prim_rt = UsdGeomRT.PointInstancer(usd_utils.get_prim_rt(prim))
+    num_instances = dataset.get_num_nodes()
+
+    if not enable_coloring or domain is None or not (domain[0] < domain[1]):
+        # Coloring disabled or degenerate domain: route every instance to prototype 0.
+        proto_indices = np.zeros((num_instances, 1), dtype=np.int32)
+        set_array_attribute(prim_rt.CreateProtoIndicesAttr(), proto_indices)
+        return
+
+    f_array = cae_simdata.fetch_data(dataset, "colors")
+    arr = array_utils.as_numpy_array(f_array)
+    if arr.ndim > 1 and arr.shape[1] > 1:
+        # Match RescaleRangeAPI: reduce vector fields to magnitude for coloring.
+        arr = np.linalg.norm(arr, axis=1)
+    else:
+        arr = arr.reshape(-1)
+
+    d_min = float(domain[0])
+    d_max = float(domain[1])
+    t = np.clip((arr - d_min) / (d_max - d_min), 0.0, 1.0)
+    proto_indices = np.clip(np.floor(t * num_protos).astype(np.int32), 0, num_protos - 1)
+    proto_indices = proto_indices.reshape(-1, 1)
+    set_array_attribute(prim_rt.CreateProtoIndicesAttr(), proto_indices)

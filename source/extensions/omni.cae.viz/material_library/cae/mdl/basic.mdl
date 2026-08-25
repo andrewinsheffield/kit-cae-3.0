@@ -288,6 +288,10 @@ export material ScalarColor(
 		[[ anno::display_name("Enable Coloring"),
 		   anno::description("Map scalar field values through the LUT. When disabled, uses the raw scalar as grayscale."),
 		   anno::in_group("Coloring") ]],
+	uniform bool use_vertex_color = false
+		[[ anno::display_name("Use Prototype Display Color"),
+		   anno::description("Read a grayscale scalar from the prototype's primvars:displayColor and use it as the LUT lookup coordinate. Used by the Glyphs operator to drive per-instance color via multi-prototype protoIndices binning."),
+		   anno::in_group("Coloring") ]],
     uniform float2 opacity_domain = float2(0.0f, -1.0f)
 		[[ anno::display_name("Opacity Domain"),
 		   anno::description("Min/max scalar range mapped through the opacity LUT."),
@@ -311,9 +315,13 @@ export material ScalarColor(
 	  bool use_coloring = (domain.x < domain.y) && enable_coloring;
 	  float field = scene::data_lookup_float("colors", 0.0f);
 	  float field_normalized = use_coloring ? (field - domain.x) / (domain.y - domain.x) : 1.0f;
+	  // Prototype-binned per-instance scalar: displayColor is authored as (g,g,g) so luminance == g.
+	  float proto_scalar = math::luminance(scene::data_lookup_color("displayColor", color(0.0f)));
+	  float lut_t = use_vertex_color ? proto_scalar : field_normalized;
+	  bool lut_active = use_vertex_color || use_coloring;
 
-	  color final_color = tex::texture_isvalid(lut) && use_coloring ?
-		tex::lookup_color(lut, float2(field_normalized, 0.0f), tex::wrap_clamp, tex::wrap_clamp) : color(field_normalized);
+	  color final_color = tex::texture_isvalid(lut) && lut_active ?
+		tex::lookup_color(lut, float2(lut_t, 0.0f), tex::wrap_clamp, tex::wrap_clamp) : color(lut_t);
 
 	  float final_opacity = mapped_opacity(opacity_domain, opacity_lut, opacity, enable_opacity);
 
