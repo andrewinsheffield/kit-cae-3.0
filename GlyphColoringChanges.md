@@ -54,13 +54,23 @@ the shaded prim, so the MDL shader's ``scene::data_lookup_color`` finds
 it without relying on primvar inheritance from the Xform root or
 native-instancing semantics.
 
+For built-in shapes the geometry under `GeomMaster` is authored directly
+(a fresh `UsdGeom.Sphere` / `Cone` / `Cylinder+Cone`). For the **Custom**
+shape, the picked template's leaf Gprim is **cloned attribute-by-attribute**
+into `GeomMaster` (see `_clone_gprim`). Direct authoring is used instead of
+`AddInternalReference(template_prim.GetPath())` because a reference arc
+composes the target's ancestor arcs — a template that lives inside a
+payloaded stage (e.g. an EDEM asset) would drag sibling scopes such as
+`GeometryGroups` into every Xform_i. Cloning values makes `GeomMaster` a
+self-contained local spec with no composition arcs.
+
 ```
 PointInstancer
 ├── (positions / orientations / scales / protoIndices / prototypes rel)
 ├── Materials/ScalarColor
 └── Prototypes (over)
-    ├── GeomMaster (class)                 ← shape authored ONCE
-    │   └── Sphere / Cone / Arrow-parts / <Custom template ref as `over`>
+    ├── GeomMaster (class)                 ← shape authored ONCE, no arcs
+    │   └── Sphere | Cone | Cylinder+Cone | <cloned Custom Gprim>
     ├── Xform_00 (def, references GeomMaster)
     │   └── <gprim_name> (over)            ← composed Gprim + local primvar
     │       primvars:displayColor = (0/31,  0/31,  0/31)
@@ -82,6 +92,11 @@ Key layout rules:
 - **`class` on `GeomMaster`** — excluded from render traversal, but its
   descendants still compose through `AddInternalReference` into every
   Xform. Only one authored copy of the geometry exists in the layer.
+- **Direct authoring (no reference arcs) inside `GeomMaster`** — the
+  `Custom`-shape Gprim is cloned via `_clone_gprim`, not referenced.
+  This guarantees the composed content of every `Xform_i` is exactly
+  one Gprim of the chosen type with the chosen geometric attributes,
+  and nothing else.
 - **`over` on the per-bin Gprim path** — USD composition merges the
   local primvar into the reference-composed Gprim, so the shader sees
   a unique `displayColor` on each of the 32 shaded prototypes.
@@ -92,16 +107,17 @@ Key layout rules:
   invisible to the shader. Authoring the primvar directly on the
   composed Gprim descendant removes any dependence on inheritance or
   instancing behavior; the trade-off is 32 rprims per operator instead
-  of one (fine in practice because the multi-Gprim guard keeps each
+  of one (fine in practice because the single-Gprim rule keeps each
   prototype small).
 
 **Custom template rule.** The picked template must resolve to a single
 Gprim. `_author_prototype_geometry` accepts either a `UsdGeom.Gprim`
-directly or a scope with exactly one Gprim descendant, and rejects
-anything else with a message naming the offending descendants. This
-prevents the pathology where a scope (e.g. EDEM `ParticleTypes`)
-composes multiple sub-Gprims under each Xform and every particle draws
-every child at every instance point.
+directly or a scope with exactly one Gprim descendant (which is
+resolved down to that Gprim before cloning). Anything else raises with
+a message naming the offending descendants. This prevents the pathology
+where a scope (e.g. EDEM `ParticleTypes`) composes multiple sub-Gprims
+under each Xform and every particle draws every child at every instance
+point.
 
 At operator execution time (`write_glyph_display_color`), each instance is assigned to a
 prototype bin based on its normalised field value:
@@ -189,13 +205,24 @@ primvar inheritance or native-instancing behavior.
 **`_author_prototype_geometry(stage, parent_path)`** authors the shape
 geometry into `GeomMaster` and returns the list of direct child names
 that resolve to Gprims. For built-in shapes: `["Sphere"]`, `["Cone"]`,
-`["Cylinder", "Cone"]`. For `Custom`: validates that the picked
-template is a Gprim or a scope with exactly one Gprim descendant (else
-raises with a message naming the offending descendants), then authors
-an intermediate `over` inside `GeomMaster` that internally references
-the template. `over` (not `def`) is used for the ref-carrying spec so
-the referenced Gprim's typeName wins during composition rather than
-being overridden by a locally authored `Xform`.
+`["Cylinder", "Cone"]`. For `Custom`:
+
+1. Resolve the picked template down to a single Gprim. If the pick is
+   already a Gprim, use it directly. Otherwise it must have exactly one
+   Gprim descendant, which becomes the target. Anything else raises.
+2. Clone that Gprim into `GeomMaster/<gprim_name>` using
+   `_clone_gprim(stage, source, dest_path)`. No composition arcs
+   (references, payloads, inherits, specializes, variants) are copied.
+
+**`_clone_gprim(stage, source, dest_path)`** (static helper) creates a
+fresh `def` at `dest_path` with `source.GetTypeName()`, then iterates
+`source.GetAttributes()`, copying every authored attribute value with
+`dest_prim.CreateAttribute(name, typeName).Set(attr.Get())`. It skips
+`xformOp:*`, `xformOpOrder`, `purpose`, `visibility`, and `proxyPrim`
+so the glyph shape sits at the local origin and inherits the
+PointInstancer's per-instance transform rather than the source's world
+placement. Attribute *values* are copied, not arcs — the destination is
+a self-contained local spec.
 
 The previous single-prototype `_create_prototype` helper is removed.
 
@@ -312,9 +339,12 @@ populate_glyphs()
                       │
                       ▼
         For each glyph instance i:
-          prototype = Xform_{proto_index[i]}
-          displayColor = (proto_index[i]/(N-1), ...)     ← grayscale scalar
-          Xform composes GeomMaster's geometry via internal reference
+          prototype   = Xform_{proto_index[i]}
+          gprim       = <cloned Custom Gprim> | Sphere | Cone | Cylinder+Cone
+                        composed under Xform via internal reference to GeomMaster
+          displayColor = (proto_index[i]/(N-1),)*3       ← authored on the composed
+                                                            gprim by Xform_i's local
+                                                            `over` at Xform_i/<gprim_name>
           MDL ScalarColor shader (use_vertex_color = true):
             scalar = math::luminance(displayColor)
             color  = LUT.sample(scalar)                  ← current LUT texture
@@ -327,4 +357,4 @@ populate_glyphs()
 - **Number of bins** is controlled by `GLYPH_NUM_PROTOTYPES` at operator-creation time.
   N = 32 gives ~5-bit scalar quantization; increasing N reduces banding at the cost of
   extra USD prims at creation time (runtime cost per instance is unchanged, and the shape
-  geometry is authored only once regardless of N).
+  geometry is authored only once regardless of N, inside the `GeomMaster` class).
