@@ -243,7 +243,7 @@ class Glyphs:
         prim_rt = UsdGeomRT.PointInstancer(usd_utils.get_prim_rt(prim))
         viz_utils.set_array_attribute(prim_rt.CreatePositionsAttr(), points_dataset.handle.points)
         viz_utils.set_array_attribute(
-            prim_rt.CreateProtoIndicesAttr(), np.zeros([points_dataset.get_num_nodes(), 1], dtype=np.int32)
+            prim_rt.CreateProtoIndicesAttr(), np.zeros(points_dataset.get_num_nodes(), dtype=np.int32)
         )
 
         if points_dataset.has_field("scales"):

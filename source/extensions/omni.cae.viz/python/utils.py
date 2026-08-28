@@ -1696,10 +1696,18 @@ def write_glyph_display_color(prim: Usd.Prim, dataset: simdata.Dataset) -> None:
     """
     if not prim.IsA(UsdGeom.PointInstancer):
         return
+    instancer = UsdGeom.PointInstancer(prim)
+    prim_rt = UsdGeomRT.PointInstancer(usd_utils.get_prim_rt(prim))
+
     if not dataset.has_field("colors"):
+        # Reset stale bins so instances don't keep the previous run's color
+        # assignments once the user disables coloring.
+        num_instances = dataset.get_num_nodes()
+        set_array_attribute(
+            prim_rt.CreateProtoIndicesAttr(), np.zeros(num_instances, dtype=np.int32)
+        )
         return
 
-    instancer = UsdGeom.PointInstancer(prim)
     proto_targets = instancer.GetPrototypesRel().GetForwardedTargets()
     num_protos = len(proto_targets)
     if num_protos < 2:
@@ -1733,12 +1741,11 @@ def write_glyph_display_color(prim: Usd.Prim, dataset: simdata.Dataset) -> None:
     if use_vertex_color_input.Get() is not True:
         use_vertex_color_input.Set(True)
 
-    prim_rt = UsdGeomRT.PointInstancer(usd_utils.get_prim_rt(prim))
     num_instances = dataset.get_num_nodes()
 
     if not enable_coloring or domain is None or not (domain[0] < domain[1]):
         # Coloring disabled or degenerate domain: route every instance to prototype 0.
-        proto_indices = np.zeros((num_instances, 1), dtype=np.int32)
+        proto_indices = np.zeros(num_instances, dtype=np.int32)
         set_array_attribute(prim_rt.CreateProtoIndicesAttr(), proto_indices)
         return
 
@@ -1754,5 +1761,4 @@ def write_glyph_display_color(prim: Usd.Prim, dataset: simdata.Dataset) -> None:
     d_max = float(domain[1])
     t = np.clip((arr - d_min) / (d_max - d_min), 0.0, 1.0)
     proto_indices = np.clip(np.floor(t * num_protos).astype(np.int32), 0, num_protos - 1)
-    proto_indices = proto_indices.reshape(-1, 1)
     set_array_attribute(prim_rt.CreateProtoIndicesAttr(), proto_indices)

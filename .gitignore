@@ -60,3 +60,6 @@ data/*.usda
 # Native Python extension artifacts copied by local builds.
 source/extensions/omni.cae.core/python/_omni_cae_core*.so
 source/extensions/omni.cae.core/python/_omni_cae_core*.pyd
+
+# test EDEM deck
+/DEM-poly-test

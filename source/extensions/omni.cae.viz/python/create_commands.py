@@ -653,10 +653,12 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         operator writes `protoIndices` per-instance to select among them.
 
         The shape geometry is authored once under a shared ``class`` prim
-        ``GeomMaster`` and each of the N Xforms internally references it. This
-        keeps the on-disk hierarchy compact — critical for the ``Custom`` shape,
-        where the template can be a large scope (e.g. an EDEM ``GeometryGroups``)
-        that must not be duplicated N times."""
+        ``GeomMaster`` and each of the N Xforms internally references it. Each
+        Xform is then marked ``instanceable`` so Hydra deduplicates the
+        referenced descendants into a single shared prototype rprim per unique
+        composition arc set — critical for the ``Custom`` shape, where the
+        template can be a large scope (e.g. an EDEM ``GeometryGroups``) that
+        must not be duplicated N times."""
         stage = protosPrim.GetStage()
         n = GLYPH_NUM_PROTOTYPES
         denom = max(n - 1, 1)
@@ -670,13 +672,18 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         paths: list[Sdf.Path] = []
         for i in range(n):
             xform = UsdGeom.Xform.Define(stage, protosPrim.GetPath().AppendChild(f"Xform_{i:02d}"))
-            xform.GetPrim().GetReferences().AddInternalReference(master_path)
-            pv_api = UsdGeom.PrimvarsAPI(xform.GetPrim())
+            xform_prim = xform.GetPrim()
+            xform_prim.GetReferences().AddInternalReference(master_path)
+            pv_api = UsdGeom.PrimvarsAPI(xform_prim)
             pv = pv_api.CreatePrimvar(
                 "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant
             )
             g = i / denom
             pv.Set([Gf.Vec3f(g, g, g)])
+            # Native instancing: the referenced descendants become a shared
+            # prototype rprim; the constant primvar authored above stays on the
+            # instance root (unique per bin).
+            xform_prim.SetInstanceable(True)
             paths.append(xform.GetPath())
         return paths
 
@@ -707,6 +714,26 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
             if not template_prim:
                 raise RuntimeError(
                     f"Custom prototype template prim at path {self._custom_prototype_template} not found"
+                )
+            # Multi-prototype color binning needs the template to resolve to a
+            # single renderable subgraph. When it's a scope with more than one
+            # Gprim descendant (e.g. an EDEM ParticleTypes scope), every instance
+            # ends up rendering every child at every point — the operator loses
+            # the ability to distinguish particle types via protoIndices, since
+            # protoIndices is repurposed for color bins. Refuse rather than
+            # silently produce the multi-render artifact.
+            gprim_descendants = [
+                d for d in Usd.PrimRange(template_prim) if d.IsA(UsdGeom.Gprim)
+            ]
+            if len(gprim_descendants) > 1 and not template_prim.IsA(UsdGeom.Gprim):
+                names = ", ".join(str(d.GetPath()) for d in gprim_descendants[:5])
+                more = "" if len(gprim_descendants) <= 5 else f", ... (+{len(gprim_descendants) - 5} more)"
+                raise RuntimeError(
+                    "Custom prototype template "
+                    f"'{self._custom_prototype_template}' contains multiple Gprim descendants "
+                    f"({names}{more}). The Glyphs operator uses PointInstancer prototypes to encode "
+                    "per-instance color bins, so the template must resolve to a single Gprim. "
+                    "Pick one child Gprim (e.g. a specific ParticleTypes entry) as the template."
                 )
             ref_prim = stage.DefinePrim(parent_path.AppendChild(template_prim.GetName()))
             ref_prim.GetReferences().AddInternalReference(template_prim.GetPath())
