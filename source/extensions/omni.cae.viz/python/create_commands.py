@@ -578,10 +578,18 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         primT.CreateOrientationsAttr([])
         primT.CreateScalesAttr([])
 
-        # create prototypes under an "over" prim to skip the prototypes in standard stage navigation
-        # refer to OpenUSD documentation for PointInstancer for more details.
-        protosPrim = stage.OverridePrim(primT.GetPath().AppendChild("Prototypes"))
-        primT.CreatePrototypesRel().SetTargets(self._create_prototypes(protosPrim))
+        # Prototype hierarchy lives OUTSIDE the PointInstancer as a sibling
+        # scope so the PointInstancer subtree only contains particle data
+        # (positions/orientations/scales/protoIndices). The N grayscale
+        # wrappers plus their shared GeomMaster (a class prim that references
+        # the user's Custom template or authors the built-in shape) sit under
+        # <primT>_Prototypes and are targeted by the `prototypes` relationship.
+        proto_scope_path = primT.GetPath().GetParentPath().AppendChild(
+            f"{primT.GetPrim().GetName()}_Prototypes"
+        )
+        protosPrim = stage.OverridePrim(proto_scope_path)
+        proto_targets = self._create_prototypes(protosPrim)
+        primT.CreatePrototypesRel().SetTargets(proto_targets)
 
         prim = primT.GetPrim()
         cae_viz.OperatorAPI.Apply(prim)
@@ -647,18 +655,18 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         return path
 
     def _create_prototypes(self, protosPrim: Usd.Prim) -> list[Sdf.Path]:
-        """Create GLYPH_NUM_PROTOTYPES Xform prototypes, each with a constant grayscale
-        primvars:displayColor of (i/(N-1),)*3. Returned in order; the caller wires
-        them into the PointInstancer's `prototypes` relationship and the Glyphs
-        operator writes `protoIndices` per-instance to select among them.
+        """Create GLYPH_NUM_PROTOTYPES Xform prototypes under ``protosPrim``
+        (a sibling scope of the PointInstancer), each with a constant grayscale
+        ``primvars:displayColor`` of ``(i/(N-1),)*3``. Returned in order; the
+        caller wires them into the PointInstancer's ``prototypes`` relationship
+        and the Glyphs operator writes ``protoIndices`` per-instance to select
+        among them.
 
         The shape geometry is authored once under a shared ``class`` prim
         ``GeomMaster`` and each of the N Xforms internally references it. Each
-        Xform is then marked ``instanceable`` so Hydra deduplicates the
-        referenced descendants into a single shared prototype rprim per unique
-        composition arc set — critical for the ``Custom`` shape, where the
-        template can be a large scope (e.g. an EDEM ``GeometryGroups``) that
-        must not be duplicated N times."""
+        Xform is marked ``instanceable`` so Hydra deduplicates the referenced
+        descendants into a single shared prototype rprim — critical for the
+        ``Custom`` shape whose template can be a large mesh."""
         stage = protosPrim.GetStage()
         n = GLYPH_NUM_PROTOTYPES
         denom = max(n - 1, 1)
@@ -718,8 +726,8 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
             # Multi-prototype color binning needs the template to resolve to a
             # single renderable subgraph. When it's a scope with more than one
             # Gprim descendant (e.g. an EDEM ParticleTypes scope), every instance
-            # ends up rendering every child at every point — the operator loses
-            # the ability to distinguish particle types via protoIndices, since
+            # would render every child at every point — the operator loses the
+            # ability to distinguish particle types via protoIndices, since
             # protoIndices is repurposed for color bins. Refuse rather than
             # silently produce the multi-render artifact.
             gprim_descendants = [

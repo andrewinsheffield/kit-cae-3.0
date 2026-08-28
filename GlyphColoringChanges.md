@@ -34,9 +34,10 @@ the instancer selects one prototype per instance.
 
 ### Architecture
 
-**N = 32 prototype Xforms** (`GLYPH_NUM_PROTOTYPES`) are created under `Prototypes/` when
-the Glyphs operator is first built (`CreateCaeVizGlyphs` command). Each prototype carries
-a constant `primvars:displayColor` that encodes a **grayscale scalar**:
+**N = 32 prototype Xforms** (`GLYPH_NUM_PROTOTYPES`) are created in a
+**sibling scope** of the PointInstancer when the Glyphs operator is first
+built (`CreateCaeVizGlyphs` command). Each prototype carries a constant
+`primvars:displayColor` that encodes a **grayscale scalar**:
 
 ```
 prototype i  →  displayColor = (i/(N-1),  i/(N-1),  i/(N-1))
@@ -44,28 +45,53 @@ prototype i  →  displayColor = (i/(N-1),  i/(N-1),  i/(N-1))
 
 Prototype 0 → `(0, 0, 0)` (black), prototype 31 → `(1, 1, 1)` (white).
 
-To avoid duplicating the shape geometry N times — critical for the `Custom` shape, whose
-template can be an arbitrarily large scope such as an EDEM `GeometryGroups` hierarchy —
-the shape is authored **once** under a shared `class` prim `Prototypes/GeomMaster`, and
-each of the 32 prototype Xforms internally references it:
+The PointInstancer subtree itself contains only particle data — no prototype
+geometry lives underneath it:
 
 ```
-PointInstancer
-  Prototypes (over)
-    GeomMaster (class)          ← shape authored once
-      Sphere / Cone / Arrow / <Custom template reference>
-    Xform_00 (def, references GeomMaster)
-      primvars:displayColor = (0/31,  0/31,  0/31)
-    Xform_01 (def, references GeomMaster)
-      primvars:displayColor = (1/31,  1/31,  1/31)
+<parent>
+├── Glyphs_XYZ                               ← PointInstancer (particle data only)
+│   ├── (positions / orientations / scales / protoIndices / prototypes rel)
+│   └── Materials/ScalarColor
+│
+└── Glyphs_XYZ_Prototypes (over)             ← sibling scope
+    ├── GeomMaster (class)                   ← shape authored once
+    │   └── Sphere / Cone / Arrow / <Custom template reference>
+    ├── Xform_00 (def, references GeomMaster, instanceable=true)
+    │   primvars:displayColor = (0/31,  0/31,  0/31)
+    ├── Xform_01 (def, references GeomMaster, instanceable=true)
+    │   primvars:displayColor = (1/31,  1/31,  1/31)
     ...
-    Xform_31 (def, references GeomMaster)
-      primvars:displayColor = (31/31, 31/31, 31/31)
+    └── Xform_31 (def, references GeomMaster, instanceable=true)
+        primvars:displayColor = (31/31, 31/31, 31/31)
 ```
 
-Why `class`? Class prims are excluded from render traversal but still compose normally
-through `AddInternalReference`, so `GeomMaster` never renders at world origin while its
-descendants appear correctly beneath each `Xform_i` via composition.
+Why this layout:
+
+- **Sibling scope** keeps the PointInstancer subtree lean — every field
+  under `Glyphs_XYZ` is particle data plus the material binding. Stage
+  inspectors show only particle content beneath the operator's prim.
+- **`class` `GeomMaster`** is excluded from render traversal but still
+  composes normally through `AddInternalReference`. For the `Custom` shape,
+  `GeomMaster` internally references the user's template prim, so no
+  geometry is duplicated in the authored layer.
+- **`instanceable = true` on each Xform_i** tells Hydra to deduplicate the
+  referenced descendants into a single shared prototype rprim. The
+  constant `primvars:displayColor` authored on the Xform root stays unique
+  per bin (native instancing preserves instance-local properties on the
+  root while sharing the descendant subtree).
+- **`over` on the sibling scope** means the scope itself never renders
+  directly; only the `def`-spec Xform_i inside are visible to Hydra, and
+  because they are targeted by the PointInstancer's `prototypes`
+  relationship, Hydra excludes them from normal traversal and materializes
+  them only as PointInstancer instances.
+
+The Custom shape validates its template: if the picked prim is not itself
+a `UsdGeom.Gprim` and contains more than one Gprim descendant (e.g. an EDEM
+`ParticleTypes` scope with many species), the command refuses with a
+descriptive error. Otherwise a single scope with many Gprims would draw
+every child at every instance point, and `protoIndices` (repurposed for
+color bins) could not disambiguate.
 
 At operator execution time (`write_glyph_display_color`), each instance is assigned to a
 prototype bin based on its normalised field value:
@@ -77,7 +103,8 @@ proto_index = clip(floor(normalised * N), 0, N-1)
 
 The `protoIndices` array is written via **USDRT/Fabric only** (not the USD session layer)
 to avoid conflicting with the Fabric state maintained for positions, scales, and
-orientations.
+orientations. The array is 1-D `(N,)` `int32` — matching
+`UsdGeom.PointInstancer.protoIndices`.
 
 The MDL **ScalarColor** shader (`basic.mdl`, `use_vertex_color = true`) then:
 
@@ -126,23 +153,31 @@ Both the glyph path (`use_vertex_color = true`) and the standard per-vertex scal
 **Added `GLYPH_NUM_PROTOTYPES = 32` module constant** with a block comment explaining the
 per-instance-primvar limitation and the multi-prototype workaround.
 
-**`CreateCaeVizGlyphs.do()`** now wires the `prototypes` relationship to the list returned
-by `_create_prototypes` and sets `use_vertex_color = True` on the bound shader:
+**`CreateCaeVizGlyphs.do()`** creates the prototype hierarchy as a **sibling scope** of
+the PointInstancer (`<parent>/<primT_name>_Prototypes`) and wires the `prototypes`
+relationship to the returned Xform paths. `use_vertex_color = True` is set on the bound
+shader for all shapes (including Custom):
 
 ```python
+proto_scope_path = primT.GetPath().GetParentPath().AppendChild(
+    f"{primT.GetPrim().GetName()}_Prototypes"
+)
+protosPrim = stage.OverridePrim(proto_scope_path)
 primT.CreatePrototypesRel().SetTargets(self._create_prototypes(protosPrim))
 ...
 shader.CreateInput("use_vertex_color", Sdf.ValueTypeNames.Bool).Set(True)
 ```
 
-**New `_create_prototypes(protosPrim)`** authors the shape geometry once under a
-`class`-spec `GeomMaster` prim (via `stage.CreateClassPrim`) and creates N Xforms, each
-internally referencing `GeomMaster` and carrying its own constant grayscale
+**`_create_prototypes(protosPrim)`** authors the shape geometry once under a
+`class`-spec `GeomMaster` prim (via `stage.CreateClassPrim`) inside the sibling scope
+and creates N Xforms — each internally references `GeomMaster`, is marked
+`instanceable = True` for Hydra deduplication, and carries its own constant grayscale
 `primvars:displayColor`.
 
-**`_author_prototype_geometry` refactored** to accept `(stage, parent_path)` so the same
-shape-authoring logic can target the class-prim master. The `Sphere`, `Cone`, `Arrow`,
-and `Custom` shape branches are otherwise unchanged.
+**`_author_prototype_geometry(stage, parent_path)`** authors the shape geometry into
+`GeomMaster`. The `Custom` branch validates the picked template: refuses scopes that
+contain more than one Gprim descendant with a descriptive error naming the offending
+paths.
 
 The previous single-prototype `_create_prototype` helper is removed.
 
@@ -154,19 +189,20 @@ The previous single-prototype `_create_prototype` helper is removed.
 
 Responsibilities:
 
-1. Early-return if the prim is not a `PointInstancer` or the dataset has no `colors`
-   field.
-2. Validate the multi-prototype layout: if fewer than 2 prototype targets are wired up,
+1. Early-return if the prim is not a `PointInstancer`.
+2. If the dataset has no `colors` field, reset `protoIndices` to all-zeros (routes every
+   instance to prototype 0) so stale bins from a previous run are cleared.
+3. Validate the multi-prototype layout: if fewer than 2 prototype targets are wired up,
    log a warning telling the user to re-create the operator and return.
-3. Resolve the bound MDL shader (via `UsdShade.MaterialBindingAPI.ComputeBoundMaterial()`
+4. Resolve the bound MDL shader (via `UsdShade.MaterialBindingAPI.ComputeBoundMaterial()`
    and `ComputeSurfaceSource("mdl")`) and read `enable_coloring` and `domain`.
-4. Self-heal: ensure `inputs:use_vertex_color = True` on the shader (covers operators
+5. Self-heal: ensure `inputs:use_vertex_color = True` on the shader (covers operators
    authored before this input existed).
-5. If coloring is disabled or the domain is degenerate (`dmin >= dmax`), write all-zero
+6. If coloring is disabled or the domain is degenerate (`dmin >= dmax`), write all-zero
    `protoIndices` (routes every instance to prototype 0).
-6. Fetch the `colors` field, magnitude-reduce vector fields (matching the semantics of
-   `RescaleRangeAPI.get_range()` for vectors), compute the normalised bin index array,
-   and write `protoIndices` via USDRT/Fabric.
+7. Fetch the `colors` field, magnitude-reduce vector fields (matching the semantics of
+   `RescaleRangeAPI.get_range()` for vectors), compute the normalised bin index array
+   as 1-D `(N,)` `int32`, and write `protoIndices` via USDRT/Fabric.
 
 The LUT lookup is entirely MDL-side; Python only needs to write `protoIndices`.
 
