@@ -1,3 +1,5 @@
+# Fork info: Modified Kit-CAE for EDEM poly glyph coloring
+
 # Kit-CAE: Reference Application
 
 ![Kit-CAE Banner](./docs/kit-cae-gh-banner.png)
