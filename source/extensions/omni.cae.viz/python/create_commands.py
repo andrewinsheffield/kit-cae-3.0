@@ -25,7 +25,7 @@ from omni.cae.schema import viz as cae_viz
 from omni.kit.app import get_app
 from omni.kit.property.usd import RelationshipTargetPicker
 from omni.usd import get_context
-from pxr import Gf, OmniSci, Sdf, Usd, UsdGeom, UsdShade, UsdVol, Vt
+from pxr import Gf, OmniSci, Sdf, Tf, Usd, UsdGeom, UsdShade, UsdVol, Vt
 
 from . import settings
 
@@ -578,16 +578,11 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         primT.CreateOrientationsAttr([])
         primT.CreateScalesAttr([])
 
-        # Prototype hierarchy lives OUTSIDE the PointInstancer as a sibling
-        # scope so the PointInstancer subtree only contains particle data
-        # (positions/orientations/scales/protoIndices). The N grayscale
-        # wrappers plus their shared GeomMaster (a class prim that references
-        # the user's Custom template or authors the built-in shape) sit under
-        # <primT>_Prototypes and are targeted by the `prototypes` relationship.
-        proto_scope_path = primT.GetPath().GetParentPath().AppendChild(
-            f"{primT.GetPrim().GetName()}_Prototypes"
-        )
-        protosPrim = stage.OverridePrim(proto_scope_path)
+        # Prototype hierarchy lives under an `over` child of the PointInstancer.
+        # UsdImaging reliably prunes prototype targets in this conventional
+        # location from normal scene traversal, so the grayscale wrappers are
+        # only materialized as PointInstancer instances (never at world origin).
+        protosPrim = stage.OverridePrim(primT.GetPath().AppendChild("Prototypes"))
         proto_targets = self._create_prototypes(protosPrim)
         primT.CreatePrototypesRel().SetTargets(proto_targets)
 
@@ -655,18 +650,19 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         return path
 
     def _create_prototypes(self, protosPrim: Usd.Prim) -> list[Sdf.Path]:
-        """Create GLYPH_NUM_PROTOTYPES Xform prototypes under ``protosPrim``
-        (a sibling scope of the PointInstancer), each with a constant grayscale
-        ``primvars:displayColor`` of ``(i/(N-1),)*3``. Returned in order; the
-        caller wires them into the PointInstancer's ``prototypes`` relationship
-        and the Glyphs operator writes ``protoIndices`` per-instance to select
-        among them.
+        """Create GLYPH_NUM_PROTOTYPES Xform prototypes under ``protosPrim``,
+        each with a distinct constant grayscale ``primvars:displayColor`` of
+        ``(i/(N-1),)*3``. Returned in order; the caller wires them into the
+        PointInstancer's ``prototypes`` relationship and the Glyphs operator
+        writes ``protoIndices`` per-instance to select among them.
 
         The shape geometry is authored once under a shared ``class`` prim
-        ``GeomMaster`` and each of the N Xforms internally references it. Each
-        Xform is marked ``instanceable`` so Hydra deduplicates the referenced
-        descendants into a single shared prototype rprim — critical for the
-        ``Custom`` shape whose template can be a large mesh."""
+        ``GeomMaster`` and each of the N Xforms internally references it.
+        ``displayColor`` is authored **directly on the composed Gprim
+        descendants** of each Xform via local ``over`` specs, so the MDL
+        shader's ``scene::data_lookup_color`` finds the primvar on the shaded
+        prim without depending on primvar inheritance or native-instancing
+        semantics."""
         stage = protosPrim.GetStage()
         n = GLYPH_NUM_PROTOTYPES
         denom = max(n - 1, 1)
@@ -675,35 +671,42 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
         # referencing prims, so the master geometry never renders at world origin.
         master_path = protosPrim.GetPath().AppendChild("GeomMaster")
         stage.CreateClassPrim(master_path)
-        self._author_prototype_geometry(stage, master_path)
+        gprim_child_names = self._author_prototype_geometry(stage, master_path)
+        if not gprim_child_names:
+            raise RuntimeError(
+                f"Prototype authoring for shape '{self._shape}' produced no Gprim descendants."
+            )
 
         paths: list[Sdf.Path] = []
         for i in range(n):
             xform = UsdGeom.Xform.Define(stage, protosPrim.GetPath().AppendChild(f"Xform_{i:02d}"))
-            xform_prim = xform.GetPrim()
-            xform_prim.GetReferences().AddInternalReference(master_path)
-            pv_api = UsdGeom.PrimvarsAPI(xform_prim)
-            pv = pv_api.CreatePrimvar(
-                "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant
-            )
+            xform.GetPrim().GetReferences().AddInternalReference(master_path)
             g = i / denom
-            pv.Set([Gf.Vec3f(g, g, g)])
-            # Native instancing: the referenced descendants become a shared
-            # prototype rprim; the constant primvar authored above stays on the
-            # instance root (unique per bin).
-            xform_prim.SetInstanceable(True)
+            color_value = [Gf.Vec3f(g, g, g)]
+            for child_name in gprim_child_names:
+                child_over = stage.OverridePrim(xform.GetPath().AppendChild(child_name))
+                pv = UsdGeom.PrimvarsAPI(child_over).CreatePrimvar(
+                    "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant
+                )
+                pv.Set(color_value)
             paths.append(xform.GetPath())
         return paths
 
-    def _author_prototype_geometry(self, stage: Usd.Stage, parent_path: Sdf.Path) -> None:
+    def _author_prototype_geometry(self, stage: Usd.Stage, parent_path: Sdf.Path) -> list[str]:
+        """Author the shape geometry as children of ``parent_path`` and return
+        the list of direct child names that resolve to a Gprim in the composed
+        stage. The caller uses these names to author per-prototype
+        ``displayColor`` primvars directly on the composed Gprims."""
         if self._shape == "Sphere":
             sphere = UsdGeom.Sphere.Define(stage, parent_path.AppendChild("Sphere"))
             sphere.CreateRadiusAttr().Set(0.5)
+            return ["Sphere"]
         elif self._shape == "Cone":
             cone = UsdGeom.Cone.Define(stage, parent_path.AppendChild("Cone"))
             cone.CreateHeightAttr().Set(1.0)
             cone.CreateRadiusAttr().Set(0.5)
             cone.CreateAxisAttr().Set(UsdGeom.Tokens.x)
+            return ["Cone"]
         elif self._shape == "Arrow":
             arrowCylinder = UsdGeom.Cylinder.Define(stage, parent_path.AppendChild("Cylinder"))
             arrowCylinder.CreateHeightAttr().Set(0.5)
@@ -715,6 +718,7 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
             arrowCone.CreateRadiusAttr().Set(0.3)
             arrowCone.CreateAxisAttr().Set(UsdGeom.Tokens.x)
             arrowCone.AddTranslateOp().Set((0.75, 0, 0))
+            return ["Cylinder", "Cone"]
         elif self._shape == "Custom":
             if not self._custom_prototype_template:
                 raise RuntimeError("No custom prototype template selected. Cannot execute command 'CreateCaeVizGlyphs'")
@@ -723,30 +727,62 @@ class CreateCaeVizGlyphs(omni.kit.commands.Command):
                 raise RuntimeError(
                     f"Custom prototype template prim at path {self._custom_prototype_template} not found"
                 )
-            # Multi-prototype color binning needs the template to resolve to a
-            # single renderable subgraph. When it's a scope with more than one
-            # Gprim descendant (e.g. an EDEM ParticleTypes scope), every instance
-            # would render every child at every point — the operator loses the
-            # ability to distinguish particle types via protoIndices, since
-            # protoIndices is repurposed for color bins. Refuse rather than
-            # silently produce the multi-render artifact.
-            gprim_descendants = [
-                d for d in Usd.PrimRange(template_prim) if d.IsA(UsdGeom.Gprim)
-            ]
-            if len(gprim_descendants) > 1 and not template_prim.IsA(UsdGeom.Gprim):
-                names = ", ".join(str(d.GetPath()) for d in gprim_descendants[:5])
-                more = "" if len(gprim_descendants) <= 5 else f", ... (+{len(gprim_descendants) - 5} more)"
-                raise RuntimeError(
-                    "Custom prototype template "
-                    f"'{self._custom_prototype_template}' contains multiple Gprim descendants "
-                    f"({names}{more}). The Glyphs operator uses PointInstancer prototypes to encode "
-                    "per-instance color bins, so the template must resolve to a single Gprim. "
-                    "Pick one child Gprim (e.g. a specific ParticleTypes entry) as the template."
-                )
-            ref_prim = stage.DefinePrim(parent_path.AppendChild(template_prim.GetName()))
-            ref_prim.GetReferences().AddInternalReference(template_prim.GetPath())
+            # Resolve the user's picked prim down to a single Gprim.
+            if template_prim.IsA(UsdGeom.Gprim):
+                target_prim = template_prim
+            else:
+                gprim_descendants = [
+                    d for d in Usd.PrimRange(template_prim) if d.IsA(UsdGeom.Gprim)
+                ]
+                if len(gprim_descendants) != 1:
+                    names = ", ".join(str(d.GetPath()) for d in gprim_descendants[:5]) or "(none)"
+                    more = "" if len(gprim_descendants) <= 5 else f", ... (+{len(gprim_descendants) - 5} more)"
+                    raise RuntimeError(
+                        "Custom prototype template "
+                        f"'{self._custom_prototype_template}' must resolve to a single Gprim, but "
+                        f"resolved to {len(gprim_descendants)} Gprim descendants ({names}{more}). "
+                        "Pick one specific Gprim as the template."
+                    )
+                target_prim = gprim_descendants[0]
+            # Clone the Gprim's geometric attributes into a fresh prim under
+            # GeomMaster. Do NOT use AddInternalReference here — a reference
+            # arc composes the target's ancestor arcs (e.g. an EDEM stage
+            # payload) and any sibling scopes reachable through them,
+            # dragging content like `GeometryGroups` into every Xform_i.
+            # Copying values directly authors a self-contained local spec.
+            child_name = Tf.MakeValidIdentifier(target_prim.GetName())
+            self._clone_gprim(stage, target_prim, parent_path.AppendChild(child_name))
+            return [child_name]
         else:
             raise RuntimeError(f"Unsupported shape: {self._shape}")
+
+    @staticmethod
+    def _clone_gprim(stage: Usd.Stage, source: Usd.Prim, dest_path: Sdf.Path) -> Usd.Prim:
+        """Author a fresh Gprim at ``dest_path`` whose typeName matches
+        ``source`` and whose geometric attribute values are copied from the
+        composed values of ``source``. No composition arcs (references,
+        payloads, inherits, specializes, variants) are copied — the destination
+        is a self-contained local spec. Any authored transform on the source
+        is dropped so the glyph shape sits at the local origin."""
+        dest_prim = stage.DefinePrim(dest_path, source.GetTypeName())
+
+        skip_names = {
+            "xformOpOrder",
+            "purpose",
+            "visibility",
+            "proxyPrim",
+        }
+        for attr in source.GetAttributes():
+            name = attr.GetName()
+            if name in skip_names or name.startswith("xformOp:"):
+                continue
+            if not attr.HasAuthoredValue():
+                continue
+            value = attr.Get()
+            if value is None:
+                continue
+            dest_prim.CreateAttribute(name, attr.GetTypeName()).Set(value)
+        return dest_prim
 
 
 class CreateCaeVizVolume(omni.kit.commands.Command):

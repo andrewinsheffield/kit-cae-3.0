@@ -34,10 +34,11 @@ the instancer selects one prototype per instance.
 
 ### Architecture
 
-**N = 32 prototype Xforms** (`GLYPH_NUM_PROTOTYPES`) are created in a
-**sibling scope** of the PointInstancer when the Glyphs operator is first
-built (`CreateCaeVizGlyphs` command). Each prototype carries a constant
-`primvars:displayColor` that encodes a **grayscale scalar**:
+**N = 32 prototype Xforms** (`GLYPH_NUM_PROTOTYPES`) are created under
+`<PointInstancer>/Prototypes/` when the Glyphs operator is first built
+(`CreateCaeVizGlyphs` command). Each prototype selects a distinct
+**grayscale scalar** encoded as ``primvars:displayColor`` authored on the
+prototype's composed Gprim(s):
 
 ```
 prototype i  →  displayColor = (i/(N-1),  i/(N-1),  i/(N-1))
@@ -45,53 +46,62 @@ prototype i  →  displayColor = (i/(N-1),  i/(N-1),  i/(N-1))
 
 Prototype 0 → `(0, 0, 0)` (black), prototype 31 → `(1, 1, 1)` (white).
 
-The PointInstancer subtree itself contains only particle data — no prototype
-geometry lives underneath it:
+The shape geometry is authored **once** under a shared `class` prim
+`GeomMaster`, and each of the 32 Xforms adds an internal reference to it.
+`primvars:displayColor` is authored as a **local `over` on the composed
+Gprim descendant path** of each Xform — putting the primvar directly on
+the shaded prim, so the MDL shader's ``scene::data_lookup_color`` finds
+it without relying on primvar inheritance from the Xform root or
+native-instancing semantics.
 
 ```
-<parent>
-├── Glyphs_XYZ                               ← PointInstancer (particle data only)
-│   ├── (positions / orientations / scales / protoIndices / prototypes rel)
-│   └── Materials/ScalarColor
-│
-└── Glyphs_XYZ_Prototypes (over)             ← sibling scope
-    ├── GeomMaster (class)                   ← shape authored once
-    │   └── Sphere / Cone / Arrow / <Custom template reference>
-    ├── Xform_00 (def, references GeomMaster, instanceable=true)
-    │   primvars:displayColor = (0/31,  0/31,  0/31)
-    ├── Xform_01 (def, references GeomMaster, instanceable=true)
-    │   primvars:displayColor = (1/31,  1/31,  1/31)
+PointInstancer
+├── (positions / orientations / scales / protoIndices / prototypes rel)
+├── Materials/ScalarColor
+└── Prototypes (over)
+    ├── GeomMaster (class)                 ← shape authored ONCE
+    │   └── Sphere / Cone / Arrow-parts / <Custom template ref as `over`>
+    ├── Xform_00 (def, references GeomMaster)
+    │   └── <gprim_name> (over)            ← composed Gprim + local primvar
+    │       primvars:displayColor = (0/31,  0/31,  0/31)
+    ├── Xform_01 (def, references GeomMaster)
+    │   └── <gprim_name> (over)
+    │       primvars:displayColor = (1/31,  1/31,  1/31)
     ...
-    └── Xform_31 (def, references GeomMaster, instanceable=true)
-        primvars:displayColor = (31/31, 31/31, 31/31)
+    └── Xform_31 (def, references GeomMaster)
+        └── <gprim_name> (over)
+            primvars:displayColor = (31/31, 31/31, 31/31)
 ```
 
-Why this layout:
+Key layout rules:
 
-- **Sibling scope** keeps the PointInstancer subtree lean — every field
-  under `Glyphs_XYZ` is particle data plus the material binding. Stage
-  inspectors show only particle content beneath the operator's prim.
-- **`class` `GeomMaster`** is excluded from render traversal but still
-  composes normally through `AddInternalReference`. For the `Custom` shape,
-  `GeomMaster` internally references the user's template prim, so no
-  geometry is duplicated in the authored layer.
-- **`instanceable = true` on each Xform_i** tells Hydra to deduplicate the
-  referenced descendants into a single shared prototype rprim. The
-  constant `primvars:displayColor` authored on the Xform root stays unique
-  per bin (native instancing preserves instance-local properties on the
-  root while sharing the descendant subtree).
-- **`over` on the sibling scope** means the scope itself never renders
-  directly; only the `def`-spec Xform_i inside are visible to Hydra, and
-  because they are targeted by the PointInstancer's `prototypes`
-  relationship, Hydra excludes them from normal traversal and materializes
-  them only as PointInstancer instances.
+- **`over` on the `Prototypes/` container** — UsdImaging reliably prunes
+  prototype targets in this conventional under-PointInstancer location
+  from normal scene traversal, so the wrappers only materialize as
+  PointInstancer instances (never at world origin).
+- **`class` on `GeomMaster`** — excluded from render traversal, but its
+  descendants still compose through `AddInternalReference` into every
+  Xform. Only one authored copy of the geometry exists in the layer.
+- **`over` on the per-bin Gprim path** — USD composition merges the
+  local primvar into the reference-composed Gprim, so the shader sees
+  a unique `displayColor` on each of the 32 shaded prototypes.
+- **No `SetInstanceable(True)`** — earlier attempts marked each Xform as
+  a native instance to dedupe geometry, but native instancing moves the
+  shaded Gprim into a shared master whose ancestor chain does not
+  include the instance root, so per-bin primvars on the Xform were
+  invisible to the shader. Authoring the primvar directly on the
+  composed Gprim descendant removes any dependence on inheritance or
+  instancing behavior; the trade-off is 32 rprims per operator instead
+  of one (fine in practice because the multi-Gprim guard keeps each
+  prototype small).
 
-The Custom shape validates its template: if the picked prim is not itself
-a `UsdGeom.Gprim` and contains more than one Gprim descendant (e.g. an EDEM
-`ParticleTypes` scope with many species), the command refuses with a
-descriptive error. Otherwise a single scope with many Gprims would draw
-every child at every instance point, and `protoIndices` (repurposed for
-color bins) could not disambiguate.
+**Custom template rule.** The picked template must resolve to a single
+Gprim. `_author_prototype_geometry` accepts either a `UsdGeom.Gprim`
+directly or a scope with exactly one Gprim descendant, and rejects
+anything else with a message naming the offending descendants. This
+prevents the pathology where a scope (e.g. EDEM `ParticleTypes`)
+composes multiple sub-Gprims under each Xform and every particle draws
+every child at every instance point.
 
 At operator execution time (`write_glyph_display_color`), each instance is assigned to a
 prototype bin based on its normalised field value:
@@ -153,31 +163,39 @@ Both the glyph path (`use_vertex_color = true`) and the standard per-vertex scal
 **Added `GLYPH_NUM_PROTOTYPES = 32` module constant** with a block comment explaining the
 per-instance-primvar limitation and the multi-prototype workaround.
 
-**`CreateCaeVizGlyphs.do()`** creates the prototype hierarchy as a **sibling scope** of
-the PointInstancer (`<parent>/<primT_name>_Prototypes`) and wires the `prototypes`
-relationship to the returned Xform paths. `use_vertex_color = True` is set on the bound
-shader for all shapes (including Custom):
+**`CreateCaeVizGlyphs.do()`** creates the prototype hierarchy under an
+`over` child of the PointInstancer (`<primT>/Prototypes`) — the
+conventional under-PointInstancer location that UsdImaging reliably
+prunes from normal scene traversal. `use_vertex_color = True` is set on
+the bound shader:
 
 ```python
-proto_scope_path = primT.GetPath().GetParentPath().AppendChild(
-    f"{primT.GetPrim().GetName()}_Prototypes"
-)
-protosPrim = stage.OverridePrim(proto_scope_path)
+protosPrim = stage.OverridePrim(primT.GetPath().AppendChild("Prototypes"))
 primT.CreatePrototypesRel().SetTargets(self._create_prototypes(protosPrim))
 ...
 shader.CreateInput("use_vertex_color", Sdf.ValueTypeNames.Bool).Set(True)
 ```
 
-**`_create_prototypes(protosPrim)`** authors the shape geometry once under a
-`class`-spec `GeomMaster` prim (via `stage.CreateClassPrim`) inside the sibling scope
-and creates N Xforms — each internally references `GeomMaster`, is marked
-`instanceable = True` for Hydra deduplication, and carries its own constant grayscale
-`primvars:displayColor`.
+**`_create_prototypes(protosPrim)`** authors the shape geometry once
+under a `class`-spec `GeomMaster` prim (via `stage.CreateClassPrim`),
+receives the list of Gprim child names from
+`_author_prototype_geometry`, and for each of the N Xforms adds an
+internal reference to `GeomMaster` and authors a local `over` at
+`Xform_i/<gprim_child_name>` with a constant grayscale
+`primvars:displayColor`. Authoring on the composed Gprim descendant
+guarantees the primvar lives on the shaded prim itself — no reliance on
+primvar inheritance or native-instancing behavior.
 
-**`_author_prototype_geometry(stage, parent_path)`** authors the shape geometry into
-`GeomMaster`. The `Custom` branch validates the picked template: refuses scopes that
-contain more than one Gprim descendant with a descriptive error naming the offending
-paths.
+**`_author_prototype_geometry(stage, parent_path)`** authors the shape
+geometry into `GeomMaster` and returns the list of direct child names
+that resolve to Gprims. For built-in shapes: `["Sphere"]`, `["Cone"]`,
+`["Cylinder", "Cone"]`. For `Custom`: validates that the picked
+template is a Gprim or a scope with exactly one Gprim descendant (else
+raises with a message naming the offending descendants), then authors
+an intermediate `over` inside `GeomMaster` that internally references
+the template. `over` (not `def`) is used for the ref-carrying spec so
+the referenced Gprim's typeName wins during composition rather than
+being overridden by a locally authored `Xform`.
 
 The previous single-prototype `_create_prototype` helper is removed.
 
